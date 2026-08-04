@@ -1,0 +1,26 @@
+{
+  "listen": { "host": "127.0.0.1", "port": 8080 },
+  "index": { "path": "data/model-smoke-v3.ragdb" },
+  "inference": {
+    "spawn": true,
+    "llama_server": "build/macos-dev/bin/llama-server",
+    "embedding": {
+      "model": "model/granite-embedding-107m-multilingual-Q6_K_L.gguf",
+      "api_model": "granite-embedding",
+      "host": "127.0.0.1",
+      "port": 8081,
+      "pooling": "mean",
+      "dimension": 384,
+      "context_size": 512,
+      "batch_size": 2048
+    },
+    "generation": {
+      "model": "model/Qwen3.5-4B.Q4_K_M.gguf",
+      "api_model": "qwen-generation",
+      "host": "127.0.0.1",
+      "port": 8082,
+      "context_size": 8192
+    }
+  },
+  "rag": { "context_tokens": 6144 }
+}

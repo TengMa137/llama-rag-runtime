@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "dependencies": {
+    "llama.cpp": "7bd8282c37fcd9c4d7236106d664761a23318f18",
+    "rag-cpp": "cfe46cee87fccb9ca5dee68d416229489285fdea",
+    "catch2": "v3.8.1"
+  },
+  "requirement_ranges": [
+    {"pattern":"LRS-SPEC-*","section":"all normative statements","milestone":"later unless activated explicitly","status":"planned","test":"","tier":"unassigned"},
+    {"pattern":"LRS-AC-*","section":"24","milestone":"v0.1 and later","status":"planned","test":"","tier":"behavior"},
+    {"pattern":"LRS-PHASE-*","section":"25","milestone":"phased","status":"planned","test":"","tier":"behavior"}
+  ],
+  "requirements": [
+    {"id":"LRS-BUILD-001","section":"5, 8","milestone":"v0.1","status":"active","test":"[behavior][req:LRS-BUILD-001]","tier":"contract"},
+    {"id":"LRS-BUILD-002","section":"7","milestone":"v0.1","status":"active","test":"[unit][req:LRS-BUILD-002]","tier":"unit"},
+    {"id":"LRS-ING-001","section":"13","milestone":"v0.1","status":"active","test":"[component][req:LRS-ING-001]","tier":"component"},
+    {"id":"LRS-ING-002","section":"13","milestone":"v0.1","status":"active","test":"[component][req:LRS-ING-002]","tier":"component"},
+    {"id":"LRS-ING-004","section":"13","milestone":"v0.1","status":"active","test":"[fault][req:LRS-ING-004]","tier":"fault"},
+    {"id":"LRS-SEARCH-001","section":"15","milestone":"v0.1","status":"active","test":"[component][req:LRS-SEARCH-001]","tier":"component"},
+    {"id":"LRS-SEARCH-002","section":"15","milestone":"v0.1","status":"active","test":"[unit][req:LRS-SEARCH-002]","tier":"unit"},
+    {"id":"LRS-SSE-001","section":"18","milestone":"v0.1","status":"active","test":"[unit][req:LRS-SSE-001]","tier":"unit"},
+    {"id":"LRS-SSE-002","section":"18","milestone":"v0.1","status":"active","test":"[behavior][req:LRS-SSE-002]","tier":"behavior"},
+    {"id":"LRS-CTX-001","section":"16","milestone":"v0.1","status":"active","test":"[unit][req:LRS-CTX-001]","tier":"unit"},
+    {"id":"LRS-SEC-001","section":"10, 21","milestone":"v0.1","status":"active","test":"[unit][req:LRS-SEC-001]","tier":"unit"},
+    {"id":"LRS-OPS-001","section":"23","milestone":"v0.1","status":"active","test":"[unit][req:LRS-OPS-001]","tier":"unit"},
+    {"id":"LRS-DRAFT-001","section":"9","milestone":"later","status":"deferred","test":"","tier":"performance"}
+  ]
+}

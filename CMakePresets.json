@@ -1,0 +1,28 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "macos-dev",
+      "displayName": "macOS development",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/macos-dev",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "LRS_BUILD_LLAMA_SERVER": "ON",
+        "LRS_BUILD_TESTS": "ON",
+        "RAGCPP_WITH_LLAMA": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "macos-dev", "configurePreset": "macos-dev" }
+  ],
+  "testPresets": [
+    {
+      "name": "macos-dev",
+      "configurePreset": "macos-dev",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}

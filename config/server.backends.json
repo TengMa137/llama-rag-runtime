@@ -1,0 +1,21 @@
+{
+  "listen": { "host": "127.0.0.1", "port": 8080 },
+  "index": { "path": "data/knowledge.ragdb" },
+  "inference": {
+    "spawn": false,
+    "embedding": {
+      "host": "127.0.0.1",
+      "port": 8081,
+      "api_model": "granite-embedding",
+      "pooling": "mean",
+      "dimension": 384
+    },
+    "generation": {
+      "host": "127.0.0.1",
+      "port": 8082,
+      "api_model": "qwen-generation",
+      "context_size": 8192
+    }
+  },
+  "rag": { "context_tokens": 6144 }
+}

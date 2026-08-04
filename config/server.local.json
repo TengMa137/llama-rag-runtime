@@ -1,0 +1,20 @@
+{
+  "listen": { "host": "127.0.0.1", "port": 8080 },
+  "index": { "path": "data/knowledge.ragdb" },
+  "inference": {
+    "spawn": true,
+    "llama_server": "build/macos-dev/bin/llama-server",
+    "embedding": {
+      "model": "/absolute/path/to/granite-embedding.gguf",
+      "api_model": "embedding-model",
+      "host": "127.0.0.1", "port": 8081, "pooling": "mean", "dimension": 768,
+      "context_size": 512, "batch_size": 2048
+    },
+    "generation": {
+      "model": "/absolute/path/to/qwen3.5-9b.gguf",
+      "api_model": "generation-model",
+      "host": "127.0.0.1", "port": 8082, "context_size": 16384
+    }
+  },
+  "rag": { "context_tokens": 8192 }
+}
