@@ -580,6 +580,14 @@ Minimum expected toolchains should follow the selected rag-cpp release. For the 
 
 MSVC support must be validated against rag-cpp's actual release CI before being declared supported. The initial release may classify Windows as experimental if the complete server integration is not continuously tested. <!-- [LRS-SPEC-023] -->
 
+### 9.5 Android library boundary
+
+Android integration must expose rag-cpp through a project-owned shared C ABI and run in the application process; it must not require the coordinator executable or llama.cpp when Flutter supplies generation and embeddings. <!-- [LRS-MOBILE-001] -->
+
+The mobile bridge must accept precomputed document-chunk and query vectors so asynchronous Flutter embedding runtimes do not have to execute through a synchronous native-to-Dart callback. <!-- [LRS-MOBILE-002] -->
+
+The initial Android build should target `arm64-v8a`, keep model inference outside rag-cpp, and persist its `.ragdb` in application-private storage. <!-- [LRS-SPEC-073] -->
+
 ---
 
 ## 10. Runtime component model

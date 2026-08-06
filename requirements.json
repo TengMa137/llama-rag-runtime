@@ -23,6 +23,8 @@
     {"id":"LRS-CTX-001","section":"16","milestone":"v0.1","status":"active","test":"[unit][req:LRS-CTX-001]","tier":"unit"},
     {"id":"LRS-SEC-001","section":"10, 21","milestone":"v0.1","status":"active","test":"[unit][req:LRS-SEC-001]","tier":"unit"},
     {"id":"LRS-OPS-001","section":"23","milestone":"v0.1","status":"active","test":"[unit][req:LRS-OPS-001]","tier":"unit"},
+    {"id":"LRS-MOBILE-001","section":"9.5","milestone":"mobile","status":"active","test":"[component][req:LRS-MOBILE-001][req:LRS-MOBILE-002]","tier":"component"},
+    {"id":"LRS-MOBILE-002","section":"9.5","milestone":"mobile","status":"active","test":"[component][req:LRS-MOBILE-001][req:LRS-MOBILE-002]","tier":"component"},
     {"id":"LRS-DRAFT-001","section":"9","milestone":"later","status":"deferred","test":"","tier":"performance"}
   ]
 }

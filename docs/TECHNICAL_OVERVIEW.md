@@ -2,7 +2,7 @@
 
 **Document role:** current implementation walkthrough  
 **Repository version:** v0.1 development snapshot  
-**Last reviewed:** 2026-08-04
+**Last reviewed:** 2026-08-05
 
 This document explains what is implemented in this repository today and how the pieces fit together. It is deliberately different from the other two entry points:
 
@@ -219,7 +219,6 @@ The native test suite uses deterministic rag-cpp hash embeddings, temporary `.ra
 Current scenarios cover:
 
 - C++17/C++23 boundary intent and loopback validation;
-- long-line chunk sizing;
 - persistence and reopen;
 - identical upsert and replacement;
 - failed embedding isolation;
@@ -233,9 +232,13 @@ Current scenarios cover:
 
 The suite is valuable but not yet the complete matrix described by the specification. In particular, there is no automated end-to-end test that starts the public coordinator executable with real GGUF models, no disconnect/capacity assertion through the public socket, and no sanitizer/coverage CI configuration committed here yet. `config/server.models.json` is the manual real-model smoke path.
 
-## 11. Mobile and Android direction
+## 11. Mobile and Android implementation
 
-Android support is a recorded design direction, not a current build target. The appropriate artifact is an in-process `libragcpp.so`, not an Android command-line server. Flutter should call it through Dart FFI or a small JNI layer and keep the `.ragdb` in app-private storage.
+The normative integration handoff for the adjacent application is
+[`MOBILE_RAG_CONTRACT.md`](MOBILE_RAG_CONTRACT.md). Start there when wiring
+`../mobileAgent`; this section explains the implementation architecture.
+
+Android now has an initial `arm64-v8a` build target. The artifact is the in-process `libragcpp_mobile.so`, not an Android command-line server. Flutter calls it through Dart FFI and keeps the `.ragdb` in app-private storage.
 
 The intended mobile split is:
 
@@ -243,26 +246,44 @@ The intended mobile split is:
 Flutter application
   |-- existing Flutter LLM engine --> answer generation
   |-- LiteRT/Flutter embedding model --> document and query vectors
-  `-- libragcpp.so --> chunk/index/search/persist
+  `-- libragcpp_mobile.so --> chunk/index/search/persist
 ```
 
 llama.cpp is unnecessary in that topology when the Flutter stack supplies both generation and embedding inference. If it only supplies generation, a separate embedding model/runtime is still required because every dense query needs an embedding.
 
+The current mobileAgent generation models do not expose an embedding API. Vector retrieval therefore uses a separate TFLite embedding model through Flutter Gemma's existing LiteRT worker. The vendored catalog includes quantized Gecko-110M models for token-free English retrieval and EmbeddingGemma-300M models for broader language coverage. This is an in-process model, not a localhost backend. The model is installed once, can embed documents ahead of chat, and remains available to embed each live query.
+
+Without that model, the mobile bridge remains useful as a persisted BM25 store through `upsertLexical` and lexical search. It does not substitute hash vectors or generation-model output for semantic embeddings.
+
 The adjacent `../mobileAgent` repository already has a Dart lexical retrieval service and, through Flutter Gemma, LiteRT embeddings plus a qdrant-edge native vector store. rag-cpp should replace those retrieval layers if adopted, rather than becoming a third independent index.
 
-Before integration, this repository needs:
+The implemented mobile C ABI can:
 
-1. a slim Android NDK target containing retrieval and persistence but excluding server/process/plugin/PDF-loader code;
-2. an `arm64-v8a` shared-library build using a recent C++23-capable NDK;
-3. a Dart-friendly C ABI for precomputed document vectors and query vectors, or an embedding callback;
-4. explicit thread/concurrency controls suitable for phone thermal and battery limits;
-5. Android persistence, reopen, corruption, and upgrade tests;
-6. Flutter Native Assets or `jniLibs` packaging in `mobileAgent`;
-7. a decision to replace or retain mobileAgent's existing qdrant-edge store based on hybrid-search quality and package cost.
+1. open or create a persisted `.ragdb`;
+2. return the exact native chunks and embedding text as JSON;
+3. upsert a lexical-only document;
+4. accept row-major precomputed document vectors from Flutter/LiteRT;
+5. accept a precomputed query vector and run dense or hybrid retrieval;
+6. return stable source records as JSON;
+7. reopen and search the persisted index.
 
-The precomputed-vector C ABI is the safer initial integration: Flutter performs embedding with its existing runtime, then passes vectors into rag-cpp without native-to-Dart callback re-entry. rag-cpp's pinned C API does not currently expose that seam, so it must be added at the project bridge level before Android integration is useful.
+The precomputed-vector C ABI keeps asynchronous Flutter inference outside C++. Flutter asks the bridge to prepare chunks, embeds every returned `embedding_text` with `TaskType.retrievalDocument`, and passes the vectors back in the same order. Query search uses `TaskType.retrievalQuery`. The bridge normalizes vectors before storing or scoring them.
 
 For ordinary mobile chatbot retrieval, use CPU NEON plus HNSW for similarity. GPU/NPU effort should focus on embedding inference. A Vulkan/OpenCL vector-search backend is unlikely to improve single-query latency enough to justify its complexity.
+
+The pinned rag-cpp core and mobile bridge have been built with Android NDK 28.2, API 24, and run on a PLQ110 (`arm64-v8a`, Android API 36). A native on-device smoke test persisted a document and returned it through hybrid vector search with supplied vectors. A Flutter integration test then loaded the packaged library from mobileAgent, persisted a lexical document through Dart FFI, and retrieved it successfully. The stripped shared library is approximately 1.6 MB in the current build.
+
+`../mobileAgent/lib/retrieval/native_rag_index.dart` is the initial Dart wrapper. The Android APK packages the library through `android/app/src/main/jniLibs/arm64-v8a`. `tools/sync_mobile_agent_android.sh` rebuilds and copies the artifact.
+
+Current mobile limitations:
+
+- operations on one native handle are serialized;
+- lexical-only and vector documents cannot be mixed in one index;
+- deletion, metadata filters, stats, and compaction are not exposed yet;
+- the bridge currently compiles the complete rag-cpp source target rather than a size-minimized source subset;
+- mobileAgent's existing `RetrievalService` still owns production call sites; the native wrapper is available but has not replaced the Dart/qdrant paths;
+- the application must retain one embedding model identity and dimension for the lifetime of an index; a mobile manifest check is still needed;
+- Dart FFI calls that can persist or rebuild a large index should move to a dedicated isolate before production use.
 
 ## 12. Known gaps and next engineering steps
 
@@ -277,6 +298,6 @@ The current vertical slice is intentionally narrower than the engineering specif
 - full conversation-aware prompt construction and citation verification;
 - structured metrics and privacy-reviewed logging;
 - real-model automated behavior tests, sanitizers, coverage, quality fixtures, and performance baselines;
-- Linux validation and an Android shared-library target.
+- Linux validation and production hardening of the Android shared-library target.
 
 Changes should update behavior tests and `requirements.json` alongside implementation. Normative future behavior belongs in the specification; verified current behavior belongs here only after the code and tests exist.

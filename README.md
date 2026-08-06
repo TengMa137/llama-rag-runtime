@@ -1,125 +1,150 @@
 # llama-rag-runtime
 
-A native local RAG coordinator built from pinned llama.cpp and rag-cpp dependencies. It stores documents, chunks, lexical indexes, embeddings, and vector-search data in one `.ragdb` file and uses OpenAI-compatible local model endpoints for embedding and generation.
+`llama-rag-runtime` is a native local retrieval-augmented generation server. It combines:
 
-## Build on macOS
+- `llama.cpp` for local embedding and text-generation models;
+- `rag-cpp` for document chunking, persistence, lexical search, vector search, and hybrid ranking;
+- a small coordinator that retrieves relevant sources and sends grounded prompts to the generation model.
+
+The desktop runtime exposes an OpenAI-compatible chat-completions API, so an existing OpenAI client can use local RAG by changing its base URL. Document ingestion and direct retrieval use the project-specific `/v1/rag/*` endpoints. An Android C ABI is also available for applications that provide embeddings in-process.
+
+## Build
+
+Clone the submodules, configure, build, and test on macOS:
 
 ```bash
+git submodule update --init --recursive
 cmake --preset macos-dev
 cmake --build --preset macos-dev
 ctest --preset macos-dev
 ```
 
-Only the user-facing programs are placed in `build/macos-dev/bin`:
+The main executables are:
 
 ```text
 build/macos-dev/bin/llama-server
 build/macos-dev/bin/llama-rag-server
 ```
 
-Static libraries are under `build/macos-dev/lib`. Test and specification-check executables are under `build/macos-dev/libexec`.
+## Configure models
 
-## Easiest startup: one terminal
+Edit `config/server.models.json` and set the two GGUF paths:
 
-With `"spawn": true`, `llama-rag-server` starts and supervises both private llama-server processes. You run only this command:
-
-```bash
-./build/macos-dev/bin/llama-rag-server \
-  --config config/server.models.json
+```json
+{
+  "listen": { "host": "127.0.0.1", "port": 8080 },
+  "index": { "path": "data/knowledge.ragdb" },
+  "inference": {
+    "spawn": true,
+    "llama_server": "build/macos-dev/bin/llama-server",
+    "embedding": {
+      "model": "model/granite-embedding.gguf",
+      "api_model": "granite-embedding",
+      "host": "127.0.0.1",
+      "port": 8081,
+      "pooling": "mean",
+      "dimension": 384,
+      "context_size": 512,
+      "batch_size": 2048
+    },
+    "generation": {
+      "model": "model/qwen-generation.gguf",
+      "api_model": "qwen-generation",
+      "host": "127.0.0.1",
+      "port": 8082,
+      "context_size": 8192
+    }
+  },
+  "rag": { "context_tokens": 6144 }
+}
 ```
 
-This creates three processes:
+The configured embedding dimension must match the embedding model. `rag.context_tokens` must be smaller than the generation model context size.
 
-```text
-127.0.0.1:8080  llama-rag-server       public RAG coordinator
-127.0.0.1:8081  llama-server           private embedding model
-127.0.0.1:8082  llama-server           private generation model
-```
+## Run
 
-The coordinator waits for both models before `/ready` returns HTTP 200. Stopping the coordinator also stops its two children.
-
-## Manual startup: three terminals
-
-Use this when you want to manage or replace the model backends yourself.
-
-Terminal 1—embedding server:
+Start the complete runtime in one terminal:
 
 ```bash
-./build/macos-dev/bin/llama-server \
-  --host 127.0.0.1 --port 8081 \
-  --model model/granite-embedding-107m-multilingual-Q6_K_L.gguf \
-  --alias granite-embedding \
-  --embeddings --pooling mean \
-  --ctx-size 512 --batch-size 2048 --ubatch-size 2048
+./build/macos-dev/bin/llama-rag-server --config config/server.models.json
 ```
 
-Terminal 2—generation server:
+With `inference.spawn` enabled, the coordinator starts and supervises both `llama-server` processes:
+
+| Address | Service | OpenAI-compatible endpoint |
+|---|---|---|
+| `http://127.0.0.1:8080` | RAG coordinator | `POST /v1/chat/completions` |
+| `http://127.0.0.1:8081` | llama.cpp embedding server | `POST /v1/embeddings` |
+| `http://127.0.0.1:8082` | llama.cpp generation server | `POST /v1/chat/completions` |
+
+The llama.cpp listeners are loopback-only model backends. Use port 8080 for grounded answers and port 8082 when you intentionally want raw generation without retrieval.
+
+To manage the model servers yourself, start compatible embedding and generation servers on ports 8081 and 8082, set `inference.spawn` to `false`, and run the coordinator with `config/server.backends.json`.
+
+Check startup state with:
 
 ```bash
-./build/macos-dev/bin/llama-server \
-  --host 127.0.0.1 --port 8082 \
-  --model model/Qwen3.5-4B.Q4_K_M.gguf \
-  --alias qwen-generation \
-  --ctx-size 8192
+curl http://127.0.0.1:8080/health
+curl http://127.0.0.1:8080/ready
 ```
 
-Terminal 3—RAG coordinator configured with `"spawn": false`:
+## Add documents
+
+Add a new document or replace an existing document with the same `id`:
 
 ```bash
-./build/macos-dev/bin/llama-rag-server \
-  --config config/server.backends.json
-```
-
-`config/server.backends.json` can point at another local OpenAI-compatible backend. The embedding backend must provide `/health` and `POST /v1/embeddings`. The generation backend must provide `/health` and streaming `POST /v1/chat/completions`. `/tokenize` is used when available; otherwise the coordinator uses a conservative estimate. v0.1 intentionally restricts model backends to loopback.
-
-## What is stored? Do I need SQLite or FAISS?
-
-No. You do not need SQLite, FAISS, a vector database, or another service.
-
-rag-cpp owns the `.ragdb` file configured by `index.path`. It contains:
-
-- normalized documents and deterministic chunks;
-- stable document identities and chunk line offsets;
-- BM25 lexical index data;
-- dense embedding vectors;
-- HNSW/vector-search structures when the corpus reaches the configured threshold;
-- tombstone and persistence data used by rag-cpp.
-
-`llama-rag-server` also writes `<index>.manifest.json` with the embedding dimension, rag-cpp version, and chunking fingerprint. It refuses to open an incompatible index.
-
-Unlike a low-level FAISS API, clients submit text rather than raw vectors. The server chunks documents, calls the embedding backend, maintains the indexes, and returns resolved source records. New document IDs append to the corpus; an existing ID is atomically replaced; identical content returns `unchanged`.
-
-Current v0.1 operations are:
-
-| Endpoint | Purpose |
-|---|---|
-| `GET /health` | Process health |
-| `GET /ready` | Models and index are ready |
-| `POST /v1/rag/documents` | Add or atomically replace a document |
-| `POST /v1/rag/search` | Return ranked chunks using `lexical`, `dense`, or `hybrid` search |
-| `POST /v1/rag/query` | Retrieve sources and stream a grounded generated answer |
-
-Document deletion, raw-vector insertion, listing every document, and metadata filtering are not exposed by the current HTTP API yet.
-
-## Index or replace a document
-
-```bash
-curl -X POST http://127.0.0.1:8080/v1/rag/documents \
+curl http://127.0.0.1:8080/v1/rag/documents \
   -H 'Content-Type: application/json' \
   -d '{
     "id": "docs/storage",
-    "content_type": "text/markdown",
     "title": "Storage",
+    "content_type": "text/markdown",
     "content": "# Storage\nThe index is persisted in a rag-cpp database."
   }'
 ```
 
-Use a new `id` to append a document. Reuse an `id` to replace that document atomically.
+The index is stored at `index.path`. Re-ingesting identical content returns `unchanged`; changed content replaces the document atomically.
 
-## Retrieve ranked sources
+For the desktop HTTP API, send the complete document to `/v1/rag/documents`. Do not split it into chunks or vectorize it first: the coordinator asks rag-cpp for the chunks, sends those chunks to the configured embedding endpoint, and commits the document only after embedding succeeds. `/v1/rag/search` likewise accepts query text and computes its query embedding internally.
+
+The pinned rag-cpp fixed chunker splits on line boundaries. A long multi-line document is chunked normally, but a single line longer than the configured chunk size remains one oversized chunk. Add line breaks before ingesting minified JSON, OCR output, or other unusually long unbroken text. This is an upstream chunker limitation; the runtime intentionally does not carry a local patch in `third_party/rag-cpp`.
+
+## Chat with RAG through an OpenAI client
+
+The coordinator accepts the standard chat-completions fields `model`, `messages`, `stream`, `temperature`, `max_tokens`, and `max_completion_tokens`. The final message must contain string content. An optional `rag` object controls retrieval:
+
+```json
+{
+  "rag": { "mode": "hybrid", "top_k": 8 }
+}
+```
+
+Python with the OpenAI SDK:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="local")
+
+response = client.chat.completions.create(
+    model="qwen-generation",
+    messages=[{"role": "user", "content": "How is the index persisted?"}],
+    temperature=0.2,
+    max_tokens=256,
+    extra_body={"rag": {"mode": "hybrid", "top_k": 8}},
+)
+
+print(response.choices[0].message.content)
+```
+
+Streaming uses normal OpenAI `chat.completion.chunk` events and terminates with `data: [DONE]`. Responses also contain a `rag_sources` extension with the ranked source records; OpenAI clients that do not expose unknown response fields can use `/v1/rag/search` to obtain them directly.
+
+The same request with raw llama.cpp generation uses `base_url="http://127.0.0.1:8082/v1"`. Embeddings use `base_url="http://127.0.0.1:8081/v1"` and `client.embeddings.create(...)`.
+
+## Retrieve without generation
 
 ```bash
-curl -X POST http://127.0.0.1:8080/v1/rag/search \
+curl http://127.0.0.1:8080/v1/rag/search \
   -H 'Content-Type: application/json' \
   -d '{
     "query": "How is the index persisted?",
@@ -128,93 +153,50 @@ curl -X POST http://127.0.0.1:8080/v1/rag/search \
   }'
 ```
 
-Results are already sorted by `rank` and include `document_id`, stable `chunk_id`, line offsets, score, and source text. Scores from different modes or index versions should not be compared directly.
+Search supports `lexical`, `dense`, and `hybrid` modes. Results include `document_id`, `chunk_id`, line offsets, score, rank, and source text.
 
-## Let the coordinator retrieve and generate
+## HTTP API
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /health` | Report process health |
+| `GET /ready` | Report whether the index and model backends are ready |
+| `GET /v1/models` | List the RAG chat model in OpenAI format |
+| `POST /v1/chat/completions` | Retrieve sources and return an OpenAI-compatible grounded completion |
+| `POST /v1/rag/documents` | Add or replace a document |
+| `POST /v1/rag/search` | Retrieve ranked source chunks |
+| `POST /v1/rag/query` | Legacy RAG event stream for project-specific clients |
+
+## Android library
+
+The Android build produces an in-process `arm64-v8a` RAG library. It does not include llama.cpp or the HTTP coordinator; the application supplies precomputed document and query embeddings. This is the only supported flow where the caller participates in vectorization: first ask the native API to prepare its exact chunks, embed every returned `embedding_text`, then pass those vectors back in the same order. Do not independently choose chunk boundaries, because persisted vectors must correspond exactly to rag-cpp's chunks.
 
 ```bash
-curl -N -X POST http://127.0.0.1:8080/v1/rag/query \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "messages": [{"role":"user","content":"How is the index persisted?"}],
-    "retrieval": {"mode":"hybrid","top_k":8},
-    "generation": {"max_tokens":256,"temperature":0.2},
-    "stream": true
-  }'
+export ANDROID_NDK_HOME="$HOME/Library/Android/sdk/ndk/28.2.13676358"
+cmake --preset android-arm64
+cmake --build --preset android-arm64
 ```
 
-The custom SSE stream emits `rag.started`, `rag.retrieval.completed`, answer deltas, and a terminal `rag.completed` or `rag.error`. Source metadata is emitted before model text.
+Output:
 
-## Use search from a TypeScript agent loop
-
-Your agent can retrieve from the coordinator and call any chat backend itself:
-
-```ts
-const search = await fetch("http://127.0.0.1:8080/v1/rag/search", {
-  method: "POST",
-  headers: { "content-type": "application/json" },
-  body: JSON.stringify({ query: "How is the index persisted?", mode: "hybrid", top_k: 8 }),
-}).then(r => r.json());
-
-const context = search.results
-  .map((source: any, i: number) => `[${i + 1}] ${source.document_id}\n${source.text}`)
-  .join("\n\n");
-
-const answer = await fetch("http://127.0.0.1:8082/v1/chat/completions", {
-  method: "POST",
-  headers: { "content-type": "application/json" },
-  body: JSON.stringify({
-    model: "qwen-generation",
-    messages: [{
-      role: "user",
-      content: `Answer using only these sources and cite [n].\n\n${context}\n\nQuestion: How is the index persisted?`,
-    }],
-    stream: false,
-  }),
-}).then(r => r.json());
-
-console.log(answer.choices[0].message.content);
+```text
+build/android-arm64/lib/libragcpp_mobile.so
 ```
 
-Port 8082 is deliberately private/loopback-only, but a local TypeScript or Python process can call it.
+See `docs/MOBILE_RAG_CONTRACT.md` for the C ABI lifecycle and embedding contract. Use `tools/sync_mobile_agent_android.sh` to copy a built library into the adjacent `mobileAgent` checkout.
 
-## Use search from a Python agent loop
+## Development
 
-```python
-import json
-from urllib.request import Request, urlopen
+Format project-owned C and C++ files with:
 
-def post(url, payload):
-    request = Request(
-        url,
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
-    )
-    return json.load(urlopen(request))
-
-search = post("http://127.0.0.1:8080/v1/rag/search", {
-    "query": "How is the index persisted?",
-    "mode": "hybrid",
-    "top_k": 8,
-})
-
-context = "\n\n".join(
-    f"[{i}] {source['document_id']}\n{source['text']}"
-    for i, source in enumerate(search["results"], 1)
-)
-
-answer = post("http://127.0.0.1:8082/v1/chat/completions", {
-    "model": "qwen-generation",
-    "messages": [{
-        "role": "user",
-        "content": f"Answer using only these sources and cite [n].\n\n{context}\n\nQuestion: How is the index persisted?",
-    }],
-    "stream": False,
-})
-
-print(answer["choices"][0]["message"]["content"])
+```bash
+cmake --build --preset macos-dev --target format
 ```
 
-For most applications, `/v1/rag/query` is simpler and safer because the coordinator performs context budgeting, source ordering, prompt isolation, and cancellation. Calling `/v1/rag/search` plus `/v1/chat/completions` separately is useful when your own agent loop needs to decide when to retrieve, rerank, or generate.
+Check formatting without changing files:
 
-See [`docs/TECHNICAL_OVERVIEW.md`](docs/TECHNICAL_OVERVIEW.md) for a maintainer-oriented walkthrough of the current implementation, [`docs/llama-rag-server-spec.md`](docs/llama-rag-server-spec.md) for the broader product vision, and `requirements.json` for machine-readable requirement status and test mappings.
+```bash
+cmake --build --preset macos-dev --target format-check
+```
+
+Implementation details are in `docs/TECHNICAL_OVERVIEW.md`; the broader design and requirement IDs are in `docs/llama-rag-server-spec.md` and `requirements.json`.

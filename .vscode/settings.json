@@ -1,0 +1,30 @@
+{
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/build/macos-dev/compile_commands.json",
+    "C_Cpp.default.compilerPath": "/usr/bin/clang++",
+    "C_Cpp.default.cppStandard": "c++23",
+
+    "[c]": {
+        "editor.tabSize": 4,
+        "editor.insertSpaces": true,
+        "editor.detectIndentation": false,
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "ms-vscode.cpptools"
+    },
+
+    "[cpp]": {
+        "editor.tabSize": 4,
+        "editor.insertSpaces": true,
+        "editor.detectIndentation": false,
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "ms-vscode.cpptools"
+    },
+
+    "C_Cpp.errorSquiggles": "enabled",
+    "C_Cpp.codeAnalysis.exclude": {
+        "${workspaceFolder}/build/**": true,
+        "${workspaceFolder}/third_party/**": true
+    },
+    "C_Cpp.codeAnalysis.clangTidy.enabled": true,
+    "C_Cpp.codeAnalysis.runAutomatically": true,
+    "C_Cpp.formatting": "clangFormat"
+}
