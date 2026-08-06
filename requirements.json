@@ -15,6 +15,7 @@
     {"id":"LRS-BUILD-002","section":"7","milestone":"v0.1","status":"active","test":"[unit][req:LRS-BUILD-002]","tier":"unit"},
     {"id":"LRS-ING-001","section":"13","milestone":"v0.1","status":"active","test":"[component][req:LRS-ING-001]","tier":"component"},
     {"id":"LRS-ING-002","section":"13","milestone":"v0.1","status":"active","test":"[component][req:LRS-ING-002]","tier":"component"},
+    {"id":"LRS-ING-003","section":"13","milestone":"v0.1","status":"active","test":"[component][req:LRS-ING-003]","tier":"component"},
     {"id":"LRS-ING-004","section":"13","milestone":"v0.1","status":"active","test":"[fault][req:LRS-ING-004]","tier":"fault"},
     {"id":"LRS-SEARCH-001","section":"15","milestone":"v0.1","status":"active","test":"[component][req:LRS-SEARCH-001]","tier":"component"},
     {"id":"LRS-SEARCH-002","section":"15","milestone":"v0.1","status":"active","test":"[unit][req:LRS-SEARCH-002]","tier":"unit"},

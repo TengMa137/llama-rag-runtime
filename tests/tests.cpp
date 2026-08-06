@@ -83,6 +83,40 @@ SCENARIO("identical ingestion is unchanged and replacement is atomic",
     std::filesystem::remove_all(root);
 }
 
+SCENARIO("document deletion is persistent and idempotent", "[component][req:LRS-ING-003]") {
+    const auto root = std::filesystem::temp_directory_path() / "lrs-delete-document";
+    std::filesystem::remove_all(root);
+    const auto database = root / "knowledge.ragdb";
+    {
+        lrs::Service service(test_config(database));
+        service.initialize();
+        int status = 0;
+        service.ingest(document("A semantic narwhal marker."), status);
+        const auto removed =
+            nlohmann::json::parse(service.delete_document("demo/getting-started", status));
+        REQUIRE(status == 200);
+        REQUIRE(removed.at("deleted") == true);
+        for (const std::string mode : {"lexical", "dense", "hybrid"}) {
+            const auto result = nlohmann::json::parse(service.search(
+                nlohmann::json{{"query", "narwhal"}, {"mode", mode}, {"top_k", 8}}.dump(), status));
+            REQUIRE(status == 200);
+            REQUIRE(result.at("results").empty());
+        }
+        REQUIRE(nlohmann::json::parse(service.delete_document("demo/getting-started", status))
+                    .at("deleted") == false);
+    }
+    {
+        lrs::Service reopened(test_config(database));
+        reopened.initialize();
+        int status = 0;
+        REQUIRE(nlohmann::json::parse(
+                    reopened.search(R"({"query":"narwhal","mode":"hybrid","top_k":8})", status))
+                    .at("results")
+                    .empty());
+    }
+    std::filesystem::remove_all(root);
+}
+
 SCENARIO("failed embedding leaves the active index unchanged", "[fault][req:LRS-ING-004]") {
     const auto root = std::filesystem::temp_directory_path() / "lrs-failed-embedding";
     std::filesystem::remove_all(root);

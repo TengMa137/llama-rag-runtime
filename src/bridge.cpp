@@ -141,6 +141,30 @@ void validate_manifest(const lrs_index_options& options) {
         manifest.value("overlap_lines", 0U) != 4U || manifest.value("heading_context", true))
         throw std::runtime_error("index manifest is incompatible with runtime configuration");
 }
+
+int publish(std::unique_ptr<rag::Engine> next, const lrs_index_options& options,
+            lrs_index** candidate, char** error) {
+    const std::filesystem::path database(options.database_path);
+    if (database.has_parent_path())
+        std::filesystem::create_directories(database.parent_path());
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::string staging = database.string() + ".generation-" + std::to_string(nonce);
+    auto saved = next->save(staging);
+    if (!saved)
+        return fail(error, saved.error().message);
+    auto validated = rag::Engine::open(staging);
+    if (!validated) {
+        std::filesystem::remove(staging);
+        return fail(error, "candidate validation failed: " + validated.error().message);
+    }
+    std::filesystem::rename(staging, database);
+    write_manifest(options);
+    auto value = std::make_unique<lrs_index>();
+    value->path = options.database_path;
+    value->engine = std::move(next);
+    *candidate = value.release();
+    return 0;
+}
 } // namespace
 
 extern "C" int lrs_index_open(const lrs_index_options* options, lrs_index** out, char** error) {
@@ -186,27 +210,34 @@ extern "C" int lrs_index_stage_upsert(const lrs_index* current, const lrs_index_
         if (!built)
             return fail(error, built.error().message);
 
-        const std::filesystem::path database(options->database_path);
-        if (database.has_parent_path())
-            std::filesystem::create_directories(database.parent_path());
-        const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
-        const std::string staging = database.string() + ".generation-" + std::to_string(nonce);
-        auto saved = next->save(staging);
-        if (!saved)
-            return fail(error, saved.error().message);
-        auto validated = rag::Engine::open(staging);
-        if (!validated) {
-            std::filesystem::remove(staging);
-            return fail(error, "candidate validation failed: " + validated.error().message);
-        }
-        std::filesystem::rename(staging, database);
-        write_manifest(*options);
         *unchanged = 0;
-        auto value = std::make_unique<lrs_index>();
-        value->path = options->database_path;
-        value->engine = std::move(next);
-        *candidate = value.release();
-        return 0;
+        return publish(std::move(next), *options, candidate, error);
+    } catch (const std::exception& e) {
+        return fail(error, e.what());
+    }
+}
+
+extern "C" int lrs_index_stage_delete(const lrs_index* current, const lrs_index_options* options,
+                                      const char* document_id, lrs_index** candidate, int* deleted,
+                                      char** error) {
+    if (!current || !options || !document_id || !candidate || !deleted)
+        return fail(error, "invalid delete arguments");
+    try {
+        auto next = load_engine(*options);
+        const auto id = next->corpus().find_by_uri(document_id);
+        if (!id) {
+            *deleted = 0;
+            auto value = std::make_unique<lrs_index>();
+            value->path = options->database_path;
+            value->engine = std::move(next);
+            *candidate = value.release();
+            return 0;
+        }
+        auto removed = next->corpus().remove_document(*id);
+        if (!removed)
+            return fail(error, removed.error().message);
+        *deleted = 1;
+        return publish(std::move(next), *options, candidate, error);
     } catch (const std::exception& e) {
         return fail(error, e.what());
     }

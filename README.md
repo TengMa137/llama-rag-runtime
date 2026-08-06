@@ -107,53 +107,199 @@ The index is stored at `index.path`. Re-ingesting identical content returns `unc
 
 For the desktop HTTP API, send the complete document to `/v1/rag/documents`. Do not split it into chunks or vectorize it first: the coordinator asks rag-cpp for the chunks, sends those chunks to the configured embedding endpoint, and commits the document only after embedding succeeds. `/v1/rag/search` likewise accepts query text and computes its query embedding internally.
 
-The pinned rag-cpp fixed chunker splits on line boundaries. A long multi-line document is chunked normally, but a single line longer than the configured chunk size remains one oversized chunk. Add line breaks before ingesting minified JSON, OCR output, or other unusually long unbroken text. This is an upstream chunker limitation; the runtime intentionally does not carry a local patch in `third_party/rag-cpp`.
+The pinned upstream rag-cpp fixed chunker normally treats line boundaries as indivisible. This checkout currently carries a local UTF-8-safe patch that splits oversized source lines while preserving their original line numbers. See [`docs/LONG_LINE_CHUNKING.md`](docs/LONG_LINE_CHUNKING.md) before updating or cleaning the submodule.
 
-## Chat with RAG through an OpenAI client
+## How retrieval works
 
-The coordinator accepts the standard chat-completions fields `model`, `messages`, `stream`, `temperature`, `max_tokens`, and `max_completion_tokens`. The final message must contain string content. An optional `rag` object controls retrieval:
+rag-cpp stores the original document, its chunks, a BM25 lexical index over the chunk text, and an embedding vector for each chunk. A search does not scan or send every complete document to the model:
 
-```json
-{
-  "rag": { "mode": "hybrid", "top_k": 8 }
-}
-```
+| Mode | Query work | Ranking |
+|---|---|---|
+| `lexical` | Tokenize the query | BM25 matches query terms against indexed chunk text; no query embedding is created |
+| `dense` | Embed the query once | Vector similarity against stored chunk embeddings |
+| `hybrid` | Run both paths | Reciprocal-rank fusion combines the BM25 and dense result lists |
 
-Python with the OpenAI SDK:
+All three modes return the stored text of only the best chunks. `/v1/chat/completions` places those returned chunks in the generation prompt; it does not give the generation model the complete vector store or every full document.
 
-```python
-from openai import OpenAI
+RAG chat defaults to `hybrid` retrieval with `top_k: 8`. A direct REST request may override this with a top-level `"rag": {"mode": "lexical|dense|hybrid", "top_k": 8}` extension; the standard OpenAI SDK examples below use the defaults so their request body remains portable.
 
-client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="local")
+## TypeScript: manage documents, search, and chat
 
-response = client.chat.completions.create(
-    model="qwen-generation",
-    messages=[{"role": "user", "content": "How is the index persisted?"}],
-    temperature=0.2,
-    max_tokens=256,
-    extra_body={"rag": {"mode": "hybrid", "top_k": 8}},
-)
-
-print(response.choices[0].message.content)
-```
-
-Streaming uses normal OpenAI `chat.completion.chunk` events and terminates with `data: [DONE]`. Responses also contain a `rag_sources` extension with the ranked source records; OpenAI clients that do not expose unknown response fields can use `/v1/rag/search` to obtain them directly.
-
-The same request with raw llama.cpp generation uses `base_url="http://127.0.0.1:8082/v1"`. Embeddings use `base_url="http://127.0.0.1:8081/v1"` and `client.embeddings.create(...)`.
-
-## Retrieve without generation
+Use Node.js 18 or newer and install the OpenAI client:
 
 ```bash
-curl http://127.0.0.1:8080/v1/rag/search \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "query": "How is the index persisted?",
-    "mode": "hybrid",
-    "top_k": 8
-  }'
+npm install openai
 ```
 
-Search supports `lexical`, `dense`, and `hybrid` modes. Results include `document_id`, `chunk_id`, line offsets, score, rank, and source text.
+This example inserts a document, replaces it by reusing its ID, performs lexical and hybrid searches, asks a grounded question, and finally removes the document:
+
+```ts
+import OpenAI from "openai";
+
+const server = "http://127.0.0.1:8080";
+
+async function jsonRequest(path: string, init: RequestInit = {}) {
+  const response = await fetch(`${server}${path}`, {
+    ...init,
+    headers: { "content-type": "application/json", ...init.headers },
+  });
+  const body = await response.json();
+  if (!response.ok) throw new Error(JSON.stringify(body));
+  return body;
+}
+
+async function upsertDocument(id: string, title: string, content: string) {
+  return jsonRequest("/v1/rag/documents", {
+    method: "POST",
+    body: JSON.stringify({ id, title, content, content_type: "text/markdown" }),
+  });
+}
+
+async function removeDocument(id: string) {
+  return jsonRequest(`/v1/rag/documents/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+async function search(query: string, mode: "lexical" | "dense" | "hybrid") {
+  return jsonRequest("/v1/rag/search", {
+    method: "POST",
+    body: JSON.stringify({ query, mode, top_k: 8 }),
+  });
+}
+
+async function main() {
+  // Insert. A new ID returns status "indexed".
+  console.log(await upsertDocument(
+    "storage-guide",
+    "Storage guide",
+    "# Storage\nThe index is persisted in a rag-cpp database.",
+  ));
+
+  // Replace atomically by sending changed content with the same ID.
+  console.log(await upsertDocument(
+    "storage-guide",
+    "Storage guide",
+    "# Storage\nThe index is persisted atomically in a rag-cpp database.",
+  ));
+
+  // Lexical is appropriate for exact names, identifiers, and keywords.
+  console.log((await search("rag-cpp database", "lexical")).results);
+
+  // Hybrid combines exact term matching with semantic similarity.
+  console.log((await search("how durable storage works", "hybrid")).results);
+
+  const openai = new OpenAI({
+    baseURL: `${server}/v1`,
+    apiKey: "local", // The local coordinator does not currently validate this value.
+  });
+  const answer = await openai.chat.completions.create({
+    model: "qwen-generation",
+    messages: [{ role: "user", content: "How is the index persisted?" }],
+    max_tokens: 256,
+  });
+  console.log(answer.choices[0].message.content);
+
+  // Deletion is idempotent: deleted is false if the ID is already absent.
+  console.log(await removeDocument("storage-guide"));
+}
+
+await main();
+```
+
+## Python: manage documents, search, and chat
+
+Install the OpenAI client:
+
+```bash
+python -m pip install openai
+```
+
+The standard library handles the project-specific document and search endpoints; the OpenAI client handles grounded chat:
+
+```python
+import json
+from urllib.parse import quote
+from urllib.request import Request, urlopen
+
+from openai import OpenAI
+
+SERVER = "http://127.0.0.1:8080"
+
+
+def request_json(path, payload=None, method="POST"):
+    data = None if payload is None else json.dumps(payload).encode()
+    request = Request(
+        SERVER + path,
+        data=data,
+        method=method,
+        headers={"Content-Type": "application/json"},
+    )
+    with urlopen(request) as response:
+        return json.load(response)
+
+
+def upsert_document(document_id, title, content):
+    return request_json("/v1/rag/documents", {
+        "id": document_id,
+        "title": title,
+        "content": content,
+        "content_type": "text/markdown",
+    })
+
+
+def remove_document(document_id):
+    return request_json(
+        "/v1/rag/documents/" + quote(document_id, safe=""),
+        method="DELETE",
+    )
+
+
+def search(query, mode):
+    return request_json("/v1/rag/search", {
+        "query": query,
+        "mode": mode,
+        "top_k": 8,
+    })
+
+
+# Insert a new document.
+print(upsert_document(
+    "storage-guide",
+    "Storage guide",
+    "# Storage\nThe index is persisted in a rag-cpp database.",
+))
+
+# Replace it atomically by reusing the ID with changed content.
+print(upsert_document(
+    "storage-guide",
+    "Storage guide",
+    "# Storage\nThe index is persisted atomically in a rag-cpp database.",
+))
+
+# Use lexical for exact terminology and hybrid for general questions.
+print(search("rag-cpp database", "lexical")["results"])
+print(search("how durable storage works", "hybrid")["results"])
+
+client = OpenAI(base_url=SERVER + "/v1", api_key="local")
+answer = client.chat.completions.create(
+    model="qwen-generation",
+    messages=[{"role": "user", "content": "How is the index persisted?"}],
+    max_tokens=256,
+)
+print(answer.choices[0].message.content)
+
+# Remove it. Repeating this call succeeds with deleted=false.
+print(remove_document("storage-guide"))
+```
+
+Streaming RAG chat uses normal OpenAI `chat.completion.chunk` events and terminates with `data: [DONE]`. Responses also contain a `rag_sources` extension with the ranked source records. The raw generation backend uses `base_url="http://127.0.0.1:8082/v1"`; the raw embedding backend uses `base_url="http://127.0.0.1:8081/v1"`.
+
+## Agentic RAG status
+
+Agentic RAG is not implemented in the coordinator today. The current flow is one bounded pass: retrieve once, build one grounded prompt, and make one generation request. The vendored rag-cpp contains optional components such as HyDE, CRAG, Self-RAG gates, and RAPTOR, but `llama-rag-runtime` does not configure or call them.
+
+`docs/llama-rag-server-spec.md` describes bounded agentic retrieval as a future phase, not current behavior. There are no tool-selection loops, iterative query rewriting, retrieval grading/retry, web fallback, or `/v1/agents/*` endpoints yet. Applications can build their own agent loop by calling `/v1/rag/search` and deciding when to retrieve or generate.
 
 ## HTTP API
 
@@ -164,6 +310,7 @@ Search supports `lexical`, `dense`, and `hybrid` modes. Results include `documen
 | `GET /v1/models` | List the RAG chat model in OpenAI format |
 | `POST /v1/chat/completions` | Retrieve sources and return an OpenAI-compatible grounded completion |
 | `POST /v1/rag/documents` | Add or replace a document |
+| `DELETE /v1/rag/documents/{id}` | Idempotently remove a document |
 | `POST /v1/rag/search` | Retrieve ranked source chunks |
 | `POST /v1/rag/query` | Legacy RAG event stream for project-specific clients |
 

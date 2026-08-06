@@ -16,6 +16,7 @@ class Service {
     bool ready() const noexcept;
     std::string health_json() const;
     std::string ingest(const std::string& body, int& status);
+    std::string delete_document(const std::string& id, int& status);
     std::string search(const std::string& body, int& status) const;
     std::string models_json() const;
     std::string chat_completions(const std::string& body, int& status) const;

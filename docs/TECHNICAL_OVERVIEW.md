@@ -53,7 +53,7 @@ No SQLite, FAISS, Python service, Node service, or external vector database is r
 | `include/lrs/config.hpp` | Runtime configuration model |
 | `include/lrs/model_client.hpp` | Private llama-server generation/tokenization client |
 | `include/lrs/service.hpp` | Coordinator service API and active-index ownership |
-| `src/bridge.cpp` | rag-cpp configuration, persistence, upsert, search, and stable public chunk IDs |
+| `src/bridge.cpp` | rag-cpp configuration, persistence, upsert, deletion, search, and stable public chunk IDs |
 | `src/config.cpp` | JSON loading and v0.1 safety validation |
 | `src/main.cpp` | CLI, child processes, readiness loop, and HTTP routes |
 | `src/model_client.cpp` | Health, tokenization, OpenAI chat-completion SSE parsing, and cancellation |
@@ -146,6 +146,8 @@ Public chunk IDs are not rag-cpp numeric IDs. The bridge computes a stable FNV-1
 
 Embedding or candidate-save failure leaves the active in-memory generation unchanged. Searches that have already loaded a `shared_ptr` finish against the generation on which they started.
 
+`DELETE /v1/rag/documents/{id}` uses the same staged-publication path. It soft-deletes the document in rag-cpp so its chunks are excluded from lexical, dense, and hybrid results, validates the candidate generation, and then swaps it into service. Deleting an absent ID is an idempotent success with `deleted: false`.
+
 There is a remaining durability gap: database publication and manifest publication are two separate filesystem renames, so a crash between them is not a fully atomic two-file transaction. WAL recovery, snapshotting, and compaction policy remain future work.
 
 ## 6. Retrieval path
@@ -175,15 +177,18 @@ The service builds a prompt that labels retrieved chunks as untrusted data, asks
 
 Generation uses streaming `POST /v1/chat/completions`. The client translates OpenAI-style `choices[0].delta.content` records into the RAG event contract. A failed or malformed generation stream does not damage the index and subsequent search requests remain available. A closed downstream `DataSink` causes the upstream callback to stop, providing best-effort cancellation.
 
+The coordinator also exposes OpenAI-compatible `GET /v1/models` and `POST /v1/chat/completions`. Chat completions support streaming and non-streaming responses and use the same single-pass grounded retrieval pipeline. A `rag_sources` response extension carries the ranked chunks.
+
 Current query limitations:
 
 - only the last message content is used; full conversational history and roles are not forwarded;
-- non-streaming RAG responses are not implemented;
 - context packing is ordered truncation rather than a dedicated relevance/budget optimizer;
 - citation claims in generated prose are not validated against emitted source numbers;
-- the public coordinator does not expose a general OpenAI-compatible chat endpoint.
+- OpenAI chat currently accepts string content in the final message rather than the full multimodal content-part schema.
 
 Applications that need their own agent loop can call `/v1/rag/search` and then call an OpenAI-compatible generation backend themselves. The private ports are intentionally loopback-only.
+
+Agentic RAG is not implemented by the coordinator. The runtime does not call rag-cpp's HyDE, CRAG, Self-RAG, or RAPTOR components and does not expose agent-run endpoints. The current path retrieves once and makes one generation request; the bounded agent behavior in the product specification is a future phase.
 
 ## 8. Concurrency and ownership
 
@@ -221,6 +226,7 @@ Current scenarios cover:
 - C++17/C++23 boundary intent and loopback validation;
 - persistence and reopen;
 - identical upsert and replacement;
+- idempotent deletion and exclusion from search;
 - failed embedding isolation;
 - lexical, dense, and hybrid search;
 - stable source fields;

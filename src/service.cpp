@@ -103,6 +103,39 @@ std::string Service::ingest(const std::string& body, int& status) {
     }
 }
 
+std::string Service::delete_document(const std::string& id, int& status) {
+    try {
+        if (id.empty())
+            throw std::runtime_error("id must be non-empty");
+        if (std::any_of(id.begin(), id.end(),
+                        [](unsigned char c) { return c < 0x20 || c == 0x7f; }))
+            throw std::runtime_error("id must not contain control characters");
+        std::lock_guard<std::mutex> lock(mutation_);
+        lrs_index* candidate = nullptr;
+        char* message = nullptr;
+        int deleted = 0;
+        const auto opts = options();
+        const auto current = std::atomic_load(&active_);
+        if (lrs_index_stage_delete(current.get(), &opts, id.c_str(), &candidate, &deleted,
+                                   &message) != 0) {
+            const std::string error = message ? message : "deletion failed";
+            lrs_string_destroy(message);
+            status = 503;
+            return nlohmann::json{{"error", {{"code", "deletion_failed"}, {"message", error}}}}
+                .dump();
+        }
+        std::atomic_store(&active_, own(candidate));
+        status = 200;
+        return nlohmann::json{
+            {"object", "rag.document.deleted"}, {"id", id}, {"deleted", deleted != 0}}
+            .dump();
+    } catch (const std::exception& e) {
+        status = 400;
+        return nlohmann::json{{"error", {{"code", "invalid_request"}, {"message", e.what()}}}}
+            .dump();
+    }
+}
+
 std::string Service::search(const std::string& body, int& status) const {
     try {
         const auto input = nlohmann::json::parse(body);

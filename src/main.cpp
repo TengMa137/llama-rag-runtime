@@ -147,6 +147,13 @@ int main(int argc, char** argv) {
                 response.set_content(service.ingest(request.body, status), "application/json");
                 response.status = status;
             });
+        server.Delete(R"(/v1/rag/documents/(.+))",
+                      [&](const httplib::Request& request, httplib::Response& response) {
+                          int status = 0;
+                          response.set_content(service.delete_document(request.matches[1], status),
+                                               "application/json");
+                          response.status = status;
+                      });
         server.Post(
             "/v1/rag/search", [&](const httplib::Request& request, httplib::Response& response) {
                 int status = 0;
