@@ -4,6 +4,9 @@
 #include <catch2/catch_test_macros.hpp>
 #include <httplib.h>
 #include <nlohmann/json.hpp>
+#include <rag/c/rag.h>
+#include <rag/engine.hpp>
+#include <rag/text/chunker.hpp>
 
 #include <filesystem>
 #include <fstream>
@@ -29,6 +32,68 @@ document(std::string content = "# Local RAG\nThe index is persisted in a rag-cpp
         .dump();
 }
 } // namespace
+
+TEST_CASE("token-aware chunks enforce hard limits and preserve source lines", "[unit][chunker]") {
+    rag::text::ChunkOptions options;
+    options.max_lines = 40;
+    options.heading_context = false;
+    options.policy.target_tokens = 9;
+    options.policy.max_tokens = 12;
+    options.policy.overlap_tokens = 2;
+    options.measure_tokens = [](std::string_view text) { return text.size(); };
+
+    const auto chunks = rag::text::chunk_document(
+        rag::DocId{7}, "alpha beta gamma delta epsilon\r\nð²ð²ð²", options);
+    REQUIRE(chunks.size() > 2);
+    for (const auto& chunk : chunks) {
+        REQUIRE(chunk.text.size() <= 12);
+        REQUIRE(chunk.start_line <= chunk.end_line);
+    }
+    REQUIRE(chunks.front().start_line == 0);
+    REQUIRE(chunks.back().end_line == 1);
+}
+
+TEST_CASE("chunking fingerprint covers embedding policy", "[unit][chunker]") {
+    rag::text::ChunkOptions left;
+    left.policy.max_tokens = 512;
+    left.policy.model_identity = "model-a";
+    auto right = left;
+    right.policy.reserved_tokens = 8;
+    REQUIRE(rag::text::chunking_fingerprint(left) != rag::text::chunking_fingerprint(right));
+}
+
+TEST_CASE("owned C ABI validates versioned option structs", "[unit][abi]") {
+    rag_engine_options options{};
+    options.abi_version = RAG_C_ABI_VERSION;
+    options.struct_size = sizeof(options);
+    options.writer_threads = 1;
+    rag_engine* engine = nullptr;
+    REQUIRE(rag_engine_create(&options, &engine) == RAG_OK);
+    REQUIRE(engine != nullptr);
+    rag_engine_free(engine);
+
+    options.abi_version += 1;
+    REQUIRE(rag_engine_create(&options, &engine) == RAG_ERR_INVALID_ARGUMENT);
+}
+
+TEST_CASE("retrieval profiles are parameter bundles with diagnostics", "[unit][retrieval]") {
+    rag::Engine engine;
+    REQUIRE(engine.add("doc/a", "alpha orchard"));
+    REQUIRE(engine.add("doc/b", "beta harbor"));
+    REQUIRE(engine.build());
+
+    rag::retrieval::SearchOptions options;
+    options.profile = rag::retrieval::Profile::quality;
+    options.top_k = 1;
+    options.overrides.candidate_pool = 7;
+    rag::retrieval::Diagnostics diagnostics;
+    const auto results = engine.search("alpha", options, &diagnostics);
+    REQUIRE(results);
+    REQUIRE(results->size() == 1);
+    REQUIRE(diagnostics.profile == rag::retrieval::Profile::quality);
+    REQUIRE(diagnostics.candidate_pool == 7);
+    REQUIRE_FALSE(diagnostics.stages.empty());
+}
 
 SCENARIO("the host and bridge preserve their language boundary", "[behavior][req:LRS-BUILD-001]") {
     REQUIRE(__cplusplus >= 201703L);

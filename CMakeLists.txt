@@ -30,6 +30,7 @@ set(LRS_FORMAT_SOURCES
   src/service.cpp
   tests/tests.cpp
   tools/mobile_smoke.cpp
+  tools/rag_eval.cpp
   tools/spec_check.cpp)
 list(TRANSFORM LRS_FORMAT_SOURCES PREPEND "${CMAKE_SOURCE_DIR}/")
 
@@ -52,14 +53,7 @@ else()
   message(STATUS "clang-format not found; format and format-check targets are unavailable")
 endif()
 
-set(RAGCPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(RAGCPP_BUILD_BENCH OFF CACHE BOOL "" FORCE)
-set(RAGCPP_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(RAGCPP_BUILD_CLI OFF CACHE BOOL "" FORCE)
-set(RAGCPP_WITH_LLAMA OFF CACHE BOOL "" FORCE)
-set(RAGCPP_WITH_RCP OFF CACHE BOOL "" FORCE)
-set(RAGCPP_WITH_METAL OFF CACHE BOOL "" FORCE)
-add_subdirectory(third_party/rag-cpp)
+add_subdirectory(rag.cpp)
 
 if(LRS_BUILD_LLAMA_SERVER)
   set(LLAMA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -77,8 +71,8 @@ endif()
 if(LRS_BUILD_COORDINATOR)
   add_library(lrs_bridge STATIC src/bridge.cpp)
   target_include_directories(lrs_bridge PUBLIC include)
-  target_link_libraries(lrs_bridge PRIVATE ragcpp::ragcpp)
-  target_compile_features(lrs_bridge PRIVATE cxx_std_23)
+  target_link_libraries(lrs_bridge PRIVATE rag::rag)
+  target_compile_features(lrs_bridge PRIVATE cxx_std_20)
 
   find_package(Threads REQUIRED)
   add_library(lrs_httplib STATIC third_party/llama.cpp/vendor/cpp-httplib/httplib.cpp)
@@ -109,8 +103,8 @@ if(LRS_BUILD_MOBILE)
     OUTPUT_NAME ragcpp_mobile
     VISIBILITY_INLINES_HIDDEN YES)
   target_include_directories(lrs_mobile PUBLIC include)
-  target_link_libraries(lrs_mobile PRIVATE ragcpp::ragcpp)
-  target_compile_features(lrs_mobile PRIVATE cxx_std_23)
+  target_link_libraries(lrs_mobile PRIVATE rag::rag)
+  target_compile_features(lrs_mobile PRIVATE cxx_std_20)
 endif()
 
 if(LRS_BUILD_MOBILE AND LRS_BUILD_MOBILE_SMOKE)
@@ -127,14 +121,20 @@ if(LRS_BUILD_SPEC_CHECK)
   target_include_directories(lrs-spec-check PRIVATE third_party/llama.cpp/vendor)
   target_compile_definitions(lrs-spec-check PRIVATE
     LRS_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
-    LRS_LLAMA_PIN="7bd8282c37fcd9c4d7236106d664761a23318f18"
-    LRS_RAGCPP_PIN="cfe46cee87fccb9ca5dee68d416229489285fdea")
+    LRS_LLAMA_PIN="7bd8282c37fcd9c4d7236106d664761a23318f18")
   target_compile_features(lrs-spec-check PRIVATE cxx_std_17)
   set_target_properties(lrs-spec-check PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/libexec")
 endif()
 
-set(LRS_WARNING_TARGETS)
+add_executable(lrs-rag-eval tools/rag_eval.cpp)
+target_link_libraries(lrs-rag-eval PRIVATE rag::rag)
+target_compile_features(lrs-rag-eval PRIVATE cxx_std_20)
+target_compile_definitions(lrs-rag-eval PRIVATE LRS_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+set_target_properties(lrs-rag-eval PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/libexec")
+
+set(LRS_WARNING_TARGETS lrs-rag-eval)
 if(LRS_BUILD_SPEC_CHECK)
   list(APPEND LRS_WARNING_TARGETS lrs-spec-check)
 endif()
@@ -169,8 +169,8 @@ if(LRS_BUILD_TESTS AND LRS_BUILD_COORDINATOR AND LRS_BUILD_MOBILE)
   target_link_libraries(lrs-tests PRIVATE lrs_core lrs_mobile Catch2::Catch2WithMain)
   target_include_directories(lrs-tests PRIVATE
     third_party/llama.cpp/vendor
-    third_party/rag-cpp/include)
-  target_compile_features(lrs-tests PRIVATE cxx_std_23)
+    rag.cpp/include)
+  target_compile_features(lrs-tests PRIVATE cxx_std_20)
   set_target_properties(lrs-tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/libexec")
   add_test(NAME lrs-unit-component-behavior COMMAND lrs-tests)

@@ -3,14 +3,20 @@
 `llama-rag-runtime` is a native local retrieval-augmented generation server. It combines:
 
 - `llama.cpp` for local embedding and text-generation models;
-- `rag-cpp` for document chunking, persistence, lexical search, vector search, and hybrid ranking;
+- repository-owned [`rag.cpp/`](rag.cpp/) for document chunking, persistence,
+  lexical search, vector search, and hybrid ranking;
 - a small coordinator that retrieves relevant sources and sends grounded prompts to the generation model.
 
 The desktop runtime exposes an OpenAI-compatible chat-completions API, so an existing OpenAI client can use local RAG by changing its base URL. Document ingestion and direct retrieval use the project-specific `/v1/rag/*` endpoints. An Android C ABI is also available for applications that provide embeddings in-process.
 
-## Build
+## Prerequisites and build
 
-Clone the submodules, configure, build, and test on macOS:
+You need CMake 3.24 or newer, a C++20 compiler, Git, and enough disk space for
+the GGUF embedding and generation models. macOS is the currently verified
+desktop target. Android additionally requires NDK 28.2 or newer.
+
+Clone the repository, initialize the remaining llama.cpp submodule, configure,
+build, and test on macOS:
 
 ```bash
 git submodule update --init --recursive
@@ -99,19 +105,24 @@ curl http://127.0.0.1:8080/v1/rag/documents \
     "id": "docs/storage",
     "title": "Storage",
     "content_type": "text/markdown",
-    "content": "# Storage\nThe index is persisted in a rag-cpp database."
+    "content": "# Storage\nThe index is persisted in a rag.cpp database."
   }'
 ```
 
 The index is stored at `index.path`. Re-ingesting identical content returns `unchanged`; changed content replaces the document atomically.
 
-For the desktop HTTP API, send the complete document to `/v1/rag/documents`. Do not split it into chunks or vectorize it first: the coordinator asks rag-cpp for the chunks, sends those chunks to the configured embedding endpoint, and commits the document only after embedding succeeds. `/v1/rag/search` likewise accepts query text and computes its query embedding internally.
+For the desktop HTTP API, send the complete document to `/v1/rag/documents`. Do not split it into chunks or vectorize it first: the coordinator asks rag.cpp for the chunks, sends those chunks to the configured embedding endpoint, and commits the document only after embedding succeeds. `/v1/rag/search` likewise accepts query text and computes its query embedding internally.
 
-The pinned upstream rag-cpp fixed chunker normally treats line boundaries as indivisible. This checkout currently carries a local UTF-8-safe patch that splits oversized source lines while preserving their original line numbers. See [`docs/LONG_LINE_CHUNKING.md`](docs/LONG_LINE_CHUNKING.md) before updating or cleaning the submodule.
+The owned rag.cpp chunker enforces the recorded embedding policy, including an
+exact desktop token limit, reserved tokens, overlap, task prefixes, UTF-8-safe
+hard splitting, and original zero-based line citations. Desktop startup checks
+the embedding backend's `/tokenize` endpoint and refuses estimated counts;
+mobile records its explicitly conservative byte policy. The complete policy is
+fingerprinted in `.ragdb` metadata so incompatible documents are not mixed.
 
 ## How retrieval works
 
-rag-cpp stores the original document, its chunks, a BM25 lexical index over the chunk text, and an embedding vector for each chunk. A search does not scan or send every complete document to the model:
+rag.cpp stores the original document, its chunks, a BM25 lexical index over the chunk text, and an embedding vector for each chunk. A search does not scan or send every complete document to the model:
 
 | Mode | Query work | Ranking |
 |---|---|---|
@@ -121,14 +132,23 @@ rag-cpp stores the original document, its chunks, a BM25 lexical index over the 
 
 All three modes return the stored text of only the best chunks. `/v1/chat/completions` places those returned chunks in the generation prompt; it does not give the generation model the complete vector store or every full document.
 
+The C++ API additionally offers `efficiency`, `balanced` (default), and
+`quality` retrieval profiles. Profiles are parameter bundles over the same
+pipeline and may be overridden; quality enables MMR diversity and adjacent
+parent stitching. See
+[`rag.cpp/CAPABILITIES.md`](rag.cpp/CAPABILITIES.md).
+
 RAG chat defaults to `hybrid` retrieval with `top_k: 8`. A direct REST request may override this with a top-level `"rag": {"mode": "lexical|dense|hybrid", "top_k": 8}` extension; the standard OpenAI SDK examples below use the defaults so their request body remains portable.
 
 ## TypeScript: manage documents, search, and chat
 
-Use Node.js 18 or newer and install the OpenAI client:
+Use Node.js 18 or newer. Create a project and install the OpenAI client:
 
 ```bash
+mkdir rag-client && cd rag-client
+npm init -y
 npm install openai
+npm install --save-dev typescript tsx @types/node
 ```
 
 This example inserts a document, replaces it by reusing its ID, performs lexical and hybrid searches, asks a grounded question, and finally removes the document:
@@ -173,18 +193,18 @@ async function main() {
   console.log(await upsertDocument(
     "storage-guide",
     "Storage guide",
-    "# Storage\nThe index is persisted in a rag-cpp database.",
+    "# Storage\nThe index is persisted in a rag.cpp database.",
   ));
 
   // Replace atomically by sending changed content with the same ID.
   console.log(await upsertDocument(
     "storage-guide",
     "Storage guide",
-    "# Storage\nThe index is persisted atomically in a rag-cpp database.",
+    "# Storage\nThe index is persisted atomically in a rag.cpp database.",
   ));
 
   // Lexical is appropriate for exact names, identifiers, and keywords.
-  console.log((await search("rag-cpp database", "lexical")).results);
+  console.log((await search("rag.cpp database", "lexical")).results);
 
   // Hybrid combines exact term matching with semantic similarity.
   console.log((await search("how durable storage works", "hybrid")).results);
@@ -204,15 +224,23 @@ async function main() {
   console.log(await removeDocument("storage-guide"));
 }
 
-await main();
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
 ```
+
+Save this as `client.ts` and run it with `npx tsx client.ts` while the runtime
+is listening on port 8080.
 
 ## Python: manage documents, search, and chat
 
-Install the OpenAI client:
+Create a virtual environment and install the OpenAI client:
 
 ```bash
-python -m pip install openai
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip openai
 ```
 
 The standard library handles the project-specific document and search endpoints; the OpenAI client handles grounded chat:
@@ -267,18 +295,18 @@ def search(query, mode):
 print(upsert_document(
     "storage-guide",
     "Storage guide",
-    "# Storage\nThe index is persisted in a rag-cpp database.",
+    "# Storage\nThe index is persisted in a rag.cpp database.",
 ))
 
 # Replace it atomically by reusing the ID with changed content.
 print(upsert_document(
     "storage-guide",
     "Storage guide",
-    "# Storage\nThe index is persisted atomically in a rag-cpp database.",
+    "# Storage\nThe index is persisted atomically in a rag.cpp database.",
 ))
 
 # Use lexical for exact terminology and hybrid for general questions.
-print(search("rag-cpp database", "lexical")["results"])
+print(search("rag.cpp database", "lexical")["results"])
 print(search("how durable storage works", "hybrid")["results"])
 
 client = OpenAI(base_url=SERVER + "/v1", api_key="local")
@@ -293,11 +321,14 @@ print(answer.choices[0].message.content)
 print(remove_document("storage-guide"))
 ```
 
+Save this as `client.py` and run it with `python client.py` while the runtime is
+listening on port 8080.
+
 Streaming RAG chat uses normal OpenAI `chat.completion.chunk` events and terminates with `data: [DONE]`. Responses also contain a `rag_sources` extension with the ranked source records. The raw generation backend uses `base_url="http://127.0.0.1:8082/v1"`; the raw embedding backend uses `base_url="http://127.0.0.1:8081/v1"`.
 
 ## Agentic RAG status
 
-Agentic RAG is not implemented in the coordinator today. The current flow is one bounded pass: retrieve once, build one grounded prompt, and make one generation request. The vendored rag-cpp contains optional components such as HyDE, CRAG, Self-RAG gates, and RAPTOR, but `llama-rag-runtime` does not configure or call them.
+Agentic RAG is not implemented in the coordinator today. The current flow is one bounded pass: retrieve once, build one grounded prompt, and make one generation request. Research sources retained for provenance include components such as HyDE, CRAG, Self-RAG gates, and RAPTOR, but the explicit rag.cpp runtime target does not compile or call them.
 
 `docs/llama-rag-server-spec.md` describes bounded agentic retrieval as a future phase, not current behavior. There are no tool-selection loops, iterative query rewriting, retrieval grading/retry, web fallback, or `/v1/agents/*` endpoints yet. Applications can build their own agent loop by calling `/v1/rag/search` and deciding when to retrieve or generate.
 
@@ -316,7 +347,7 @@ Agentic RAG is not implemented in the coordinator today. The current flow is one
 
 ## Android library
 
-The Android build produces an in-process `arm64-v8a` RAG library. It does not include llama.cpp or the HTTP coordinator; the application supplies precomputed document and query embeddings. This is the only supported flow where the caller participates in vectorization: first ask the native API to prepare its exact chunks, embed every returned `embedding_text`, then pass those vectors back in the same order. Do not independently choose chunk boundaries, because persisted vectors must correspond exactly to rag-cpp's chunks.
+The Android build produces an in-process `arm64-v8a` RAG library. It does not include llama.cpp or the HTTP coordinator; the application supplies precomputed document and query embeddings. This is the only supported flow where the caller participates in vectorization: first ask the native API to prepare its exact chunks, embed every returned `embedding_text`, then pass those vectors back in the same order. Do not independently choose chunk boundaries, because persisted vectors must correspond exactly to rag.cpp's chunks.
 
 ```bash
 export ANDROID_NDK_HOME="$HOME/Library/Android/sdk/ndk/28.2.13676358"
@@ -333,6 +364,41 @@ build/android-arm64/lib/libragcpp_mobile.so
 See `docs/MOBILE_RAG_CONTRACT.md` for the C ABI lifecycle and embedding contract. Use `tools/sync_mobile_agent_android.sh` to copy a built library into the adjacent `mobileAgent` checkout.
 
 ## Development
+
+Run the deterministic retrieval evaluation for all three profiles:
+
+```bash
+./build/macos-dev/libexec/lrs-rag-eval
+```
+
+It reads `tests/fixtures/qrels.json` and reports Recall@k, MRR, and nDCG@k.
+Run the complete native/component suite with `ctest --preset macos-dev`; one
+test starts a real loopback HTTP generation fixture and exercises persisted
+ingestion, retrieval, grounded streaming, deletion, reopen, and mobile supplied
+vectors.
+
+### Real-model release smoke test
+
+With both GGUF paths configured, start the runtime and exercise the same public
+API used by applications:
+
+```bash
+./build/macos-dev/bin/llama-rag-server --config config/server.models.json
+
+curl --fail http://127.0.0.1:8080/ready
+curl --fail http://127.0.0.1:8080/v1/rag/documents \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"smoke/real","content":"The verification phrase is cobalt narwhal sundial."}'
+curl --fail http://127.0.0.1:8080/v1/rag/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"verification phrase","mode":"hybrid","top_k":3}'
+curl --fail http://127.0.0.1:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"qwen-generation","messages":[{"role":"user","content":"What is the verification phrase?"}],"max_tokens":512,"temperature":0}'
+```
+
+Stop and restart the runtime, then repeat the search to verify `.ragdb` reopen.
+Use a disposable `index.path` when running this against a non-test installation.
 
 Format project-owned C and C++ files with:
 

@@ -2,7 +2,6 @@
   "schema": 1,
   "dependencies": {
     "llama.cpp": "7bd8282c37fcd9c4d7236106d664761a23318f18",
-    "rag-cpp": "cfe46cee87fccb9ca5dee68d416229489285fdea",
     "catch2": "v3.8.1"
   },
   "requirement_ranges": [

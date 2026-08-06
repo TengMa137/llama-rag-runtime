@@ -14,15 +14,21 @@ bool ModelClient::healthy() const {
 }
 
 std::size_t ModelClient::tokenize(const std::string& text) const {
+    if (const auto exact = tokenize_exact(text))
+        return *exact;
+    return (text.size() + 3) / 4;
+}
+
+std::optional<std::size_t> ModelClient::tokenize_exact(const std::string& text) const {
     httplib::Client client(endpoint_.host, endpoint_.port);
     const auto response =
         client.Post("/tokenize", nlohmann::json{{"content", text}}.dump(), "application/json");
     if (!response || response->status != 200)
-        return (text.size() + 3) / 4;
+        return std::nullopt;
     try {
         return nlohmann::json::parse(response->body).at("tokens").size();
     } catch (...) {
-        return (text.size() + 3) / 4;
+        return std::nullopt;
     }
 }
 

@@ -17,6 +17,10 @@ typedef struct {
     size_t embedding_dimension;
     int deterministic_embeddings;
     const char* embedding_model;
+    size_t max_input_tokens;
+    size_t reserved_tokens;
+    size_t (*measure_tokens)(void* context, const char* text, size_t length);
+    void* token_measurer_context;
 } lrs_index_options;
 
 int lrs_index_open(const lrs_index_options* options, lrs_index** out, char** error);

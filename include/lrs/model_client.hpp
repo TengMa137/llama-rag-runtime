@@ -2,6 +2,7 @@
 
 #include "lrs/config.hpp"
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -11,6 +12,7 @@ class ModelClient {
     explicit ModelClient(Endpoint endpoint, std::string model = "default");
     bool healthy() const;
     std::size_t tokenize(const std::string& text) const;
+    std::optional<std::size_t> tokenize_exact(const std::string& text) const;
     bool generate(const std::string& prompt, std::size_t max_tokens, double temperature,
                   const std::function<bool(const std::string&)>& delta,
                   const std::function<bool()>& connected, std::string& error) const;

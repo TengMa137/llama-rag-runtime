@@ -9,7 +9,7 @@ than the future server specification.
 The current Android path has been built for `arm64-v8a` with Android NDK 28.2,
 integrated into mobileAgent, and exercised on the PLQ110:
 
-- native rag-cpp persistence plus hybrid search passed with supplied vectors;
+- native rag.cpp persistence plus hybrid search passed with supplied vectors;
 - Flutter loaded the packaged library and passed lexical persistence/search;
 - the real EmbeddingGemma CPU path produced 768-dimensional vectors, indexed
   documents, passed hybrid ranking, and preserved results after reopen;
@@ -46,9 +46,9 @@ mobileAgent's existing Flutter LLM engine
 ```
 
 There is no localhost process in this topology. The mobile RAG path needs
-neither `llama-server` nor the coordinator executable, and rag-cpp does not
+neither `llama-server` nor the coordinator executable, and rag.cpp does not
 load an embedding model. SQLite is also unnecessary: the `.ragdb` file is the
-rag-cpp index and persistence format.
+rag.cpp index and persistence format.
 
 ## Recommended embedding model
 

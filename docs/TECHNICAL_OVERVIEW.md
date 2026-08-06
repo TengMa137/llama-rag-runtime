@@ -2,7 +2,7 @@
 
 **Document role:** current implementation walkthrough  
 **Repository version:** v0.1 development snapshot  
-**Last reviewed:** 2026-08-05
+**Last reviewed:** 2026-08-07
 
 This document explains what is implemented in this repository today and how the pieces fit together. It is deliberately different from the other two entry points:
 
@@ -25,7 +25,10 @@ build/macos-dev/bin/llama-server
 
 `llama-server` comes from the pinned llama.cpp submodule. Two instances provide embedding and generation. They can be children of the coordinator or independently managed OpenAI-compatible loopback backends.
 
-rag-cpp is embedded as a C++23 static library. It owns document/chunk records, embeddings, BM25, dense retrieval, hybrid retrieval, and `.ragdb` persistence. A project-owned C ABI keeps its C++23 types out of the C++17 coordinator.
+The repository-owned rag.cpp is embedded as a C++20 static library. It owns
+document/chunk records, embeddings, BM25, dense retrieval, hybrid retrieval,
+and `.ragdb` persistence. A project-owned C ABI keeps C++ types out of the
+C++17 coordinator.
 
 ```text
 client
@@ -34,8 +37,8 @@ client
   v
 llama-rag-server (C++17)
   |-- lrs_core: config, model HTTP client, service logic
-  |-- lrs_bridge: C ABI boundary compiled as C++23
-  |     `-- rag-cpp --> data/*.ragdb
+  |-- lrs_bridge: C ABI boundary compiled as C++20
+  |     `-- rag.cpp --> data/*.ragdb
   |-- embedding HTTP --> llama-server on 127.0.0.1:8081
   `-- generation HTTP --> llama-server on 127.0.0.1:8082
 ```
@@ -49,11 +52,11 @@ No SQLite, FAISS, Python service, Node service, or external vector database is r
 | `CMakeLists.txt` | Superbuild, target language boundaries, dependency options, output layout, and test registration |
 | `CMakePresets.json` | The `macos-dev` configure/build/test workflow |
 | `config/` | Spawned-model, manually managed backend, and real-model smoke configurations |
-| `include/lrs/bridge.h` | C-compatible ownership and retrieval boundary around rag-cpp |
+| `include/lrs/bridge.h` | C-compatible ownership and retrieval boundary around rag.cpp |
 | `include/lrs/config.hpp` | Runtime configuration model |
 | `include/lrs/model_client.hpp` | Private llama-server generation/tokenization client |
 | `include/lrs/service.hpp` | Coordinator service API and active-index ownership |
-| `src/bridge.cpp` | rag-cpp configuration, persistence, upsert, deletion, search, and stable public chunk IDs |
+| `src/bridge.cpp` | rag.cpp configuration, persistence, upsert, deletion, search, and stable public chunk IDs |
 | `src/config.cpp` | JSON loading and v0.1 safety validation |
 | `src/main.cpp` | CLI, child processes, readiness loop, and HTTP routes |
 | `src/model_client.cpp` | Health, tokenization, OpenAI chat-completion SSE parsing, and cancellation |
@@ -62,7 +65,7 @@ No SQLite, FAISS, Python service, Node service, or external vector database is r
 | `tools/spec_check.cpp` | Requirement-to-test and pinned-dependency consistency checks |
 | `requirements.json` | Machine-readable active/deferred requirement catalog |
 | `third_party/llama.cpp` | Pinned upstream inference engine and `llama-server` |
-| `third_party/rag-cpp` | Pinned upstream retrieval and persistence engine |
+| `rag.cpp` | Repository-owned retrieval and persistence core |
 
 Generated applications go to `build/<preset>/bin`, static libraries to `lib`, and developer-only test/check executables to `libexec`.
 
@@ -74,17 +77,17 @@ The top-level project requires CMake 3.24 or newer and uses target-scoped langua
 llama-rag-server (C++17)
   `-- lrs_core (C++17)
        |-- lrs_httplib (C++17)
-       `-- lrs_bridge (implementation C++23, public header is C)
-            `-- ragcpp::ragcpp (C++23)
+       `-- lrs_bridge (implementation C++20, public header is C)
+            `-- rag::rag (C++20; ragcpp::ragcpp compatibility alias)
 
 llama-server (llama.cpp C++17 baseline)
 lrs-tests (native Catch2 test executable)
 lrs-spec-check (native traceability executable)
 ```
 
-The bridge exposes opaque `lrs_index*` handles, plain option structures, integer status values, and explicit string destructors. Neither rag-cpp headers nor C++23 library types cross into coordinator headers.
+The bridge exposes opaque `lrs_index*` handles, plain option structures, integer status values, and explicit string destructors. No rag.cpp header or C++ ABI type crosses into coordinator headers. rag.cpp also provides a versioned opaque C ABI whose extensible options begin with `abi_version` and `struct_size`.
 
-The pinned build disables rag-cpp's llama integration, RCP server, Metal backend, examples, CLI, and upstream tests for the product target. The coordinator talks to an embedding service over HTTP instead of loading an embedding GGUF inside rag-cpp.
+The explicit owned target omits rag.cpp's llama integration, RCP server, Metal backend, examples, CLI, and research modules from the product build. The coordinator talks to an embedding service over HTTP instead of loading an embedding GGUF inside rag.cpp.
 
 Catch2 v3.8.1 is fetched at configure time when `LRS_BUILD_TESTS=ON`. A clean configure therefore needs network access unless Catch2 is already populated in the build cache.
 
@@ -102,7 +105,7 @@ With `inference.spawn=true`, `src/main.cpp` forks two children and executes the 
 
 With `spawn=false`, the same service attaches to already-running compatible backends. There is no child lifecycle management in that mode.
 
-Startup then performs up to 120 initialization attempts at one-second intervals. Initialization opens or creates the rag-cpp engine, attaches its embedder, and checks both model health endpoints. Only after initialization succeeds does the coordinator bind its public HTTP listener.
+Startup then performs up to 120 initialization attempts at one-second intervals. Initialization opens or creates the rag.cpp engine, attaches its embedder, and checks both model health endpoints. Only after initialization succeeds does the coordinator bind its public HTTP listener.
 
 Current lifecycle limitations:
 
@@ -113,21 +116,34 @@ Current lifecycle limitations:
 
 ## 5. Index and persistence model
 
-The configured `index.path` is the active rag-cpp `.ragdb`. Its sibling `<path>.manifest.json` records the schema, rag-cpp version, chunking fingerprint, chunk settings, and embedding dimension. An existing database is rejected when the manifest is missing or incompatible.
+The configured `index.path` is the active rag.cpp `.ragdb`. Its sibling `<path>.manifest.json` records the schema, rag.cpp version, chunking fingerprint, chunk settings, and embedding dimension. An existing database is rejected when the manifest is missing or incompatible.
 
 Current chunk settings in `src/bridge.cpp` are:
 
 | Setting | Value |
 |---|---:|
-| Algorithm | rag-cpp fixed chunker |
+| Algorithm | hierarchical, UTF-8-safe, token-measured |
 | Maximum lines | 40 |
-| Maximum characters | 384 |
-| Overlap | 4 lines |
+| Desktop hard budget | configured context minus 8 reserved exact tokens |
+| Desktop target/overlap | 75% / 12.5% of usable exact tokens |
+| Mobile hard/target/overlap | 384 / 320 / 32 conservative UTF-8 bytes |
 | Markdown heading context | disabled |
 
-The 384-character bound was selected for the bundled Granite model's 512-token ceiling. These settings differ from the older 1,600-character/heading-context defaults still described in parts of the product specification; the implementation and manifest values are authoritative for existing indexes.
+Desktop requires the embedding backend's exact `/tokenize` endpoint; startup
+fails instead of estimating when it is unavailable. Mobile remains conservative
+until its embedding stack exposes an exact tokenizer. The core policy
+distinguishes target, hard, overlap, and reserved budgets and includes
+model/tokenizer identities, dimension, prefixes, counting mode, and
+invalid-UTF-8 policy in the persisted fingerprint.
 
-Public chunk IDs are not rag-cpp numeric IDs. The bridge computes a stable FNV-1a-derived ID from document URI, source line range, and normalized chunk text. Replacing text therefore produces new chunk IDs while repeated searches of the same generation retain the same IDs.
+The C++ facade also exposes named retrieval profiles over one pipeline:
+`efficiency` uses `max(3 * top_k, 24)` candidates, `balanced` (the default)
+uses `max(6 * top_k, 60)`, and `quality` uses `max(20 * top_k, 200)` plus MMR
+and adjacent-parent stitching. All use RRF by default and accept explicit
+overrides. Diagnostics report the selected profile, stages, candidate pool,
+elapsed time, and fallback reasons.
+
+Public chunk IDs are not rag.cpp numeric IDs. The bridge computes a stable FNV-1a-derived ID from document URI, source line range, and normalized chunk text. Replacing text therefore produces new chunk IDs while repeated searches of the same generation retain the same IDs.
 
 ### Ingestion and publication
 
@@ -146,7 +162,7 @@ Public chunk IDs are not rag-cpp numeric IDs. The bridge computes a stable FNV-1
 
 Embedding or candidate-save failure leaves the active in-memory generation unchanged. Searches that have already loaded a `shared_ptr` finish against the generation on which they started.
 
-`DELETE /v1/rag/documents/{id}` uses the same staged-publication path. It soft-deletes the document in rag-cpp so its chunks are excluded from lexical, dense, and hybrid results, validates the candidate generation, and then swaps it into service. Deleting an absent ID is an idempotent success with `deleted: false`.
+`DELETE /v1/rag/documents/{id}` uses the same staged-publication path. It soft-deletes the document in rag.cpp so its chunks are excluded from lexical, dense, and hybrid results, validates the candidate generation, and then swaps it into service. Deleting an absent ID is an idempotent success with `deleted: false`.
 
 There is a remaining durability gap: database publication and manifest publication are two separate filesystem renames, so a crash between them is not a fully atomic two-file transaction. WAL recovery, snapshotting, and compaction policy remain future work.
 
@@ -154,13 +170,13 @@ There is a remaining durability gap: database publication and manifest publicati
 
 `POST /v1/rag/search` accepts text, not a raw vector. `src/bridge.cpp` supports:
 
-- `lexical`: rag-cpp BM25;
+- `lexical`: rag.cpp BM25;
 - `dense`: embed the query and run dense similarity search;
-- `hybrid`: run rag-cpp's standard hybrid pipeline with reciprocal-rank fusion.
+- `hybrid`: run rag.cpp's standard hybrid pipeline with reciprocal-rank fusion.
 
 The response contains sorted results with document ID, stable chunk ID, one-based rank, mode-specific score, line offsets, and source text. `top_k` must be between 1 and 100.
 
-Within rag-cpp, hybrid lexical and dense work runs concurrently. Small dense corpora use vectorized exact similarity; larger corpora use HNSW according to rag-cpp's corpus threshold. The normal single-query path is CPU-oriented. The optional rag-cpp GPU implementation is Metal-only and accelerates very large batched flat scans, so it is neither enabled here nor applicable to Android.
+Within rag.cpp, hybrid lexical and dense work runs concurrently. Small dense corpora use vectorized exact similarity; larger corpora use HNSW according to rag.cpp's corpus threshold. The normal single-query path is CPU-oriented. The optional rag.cpp GPU implementation is Metal-only and accelerates very large batched flat scans, so it is neither enabled here nor applicable to Android.
 
 Every dense or hybrid chat query still requires one query embedding. Document embedding is normally paid during ingestion, but on-device query embedding may dominate the much smaller BM25/HNSW similarity cost.
 
@@ -188,7 +204,7 @@ Current query limitations:
 
 Applications that need their own agent loop can call `/v1/rag/search` and then call an OpenAI-compatible generation backend themselves. The private ports are intentionally loopback-only.
 
-Agentic RAG is not implemented by the coordinator. The runtime does not call rag-cpp's HyDE, CRAG, Self-RAG, or RAPTOR components and does not expose agent-run endpoints. The current path retrieves once and makes one generation request; the bounded agent behavior in the product specification is a future phase.
+Agentic RAG is not implemented by the coordinator. The runtime does not call rag.cpp's HyDE, CRAG, Self-RAG, or RAPTOR components and does not expose agent-run endpoints. The current path retrieves once and makes one generation request; the bounded agent behavior in the product specification is a future phase.
 
 ## 8. Concurrency and ownership
 
@@ -197,14 +213,14 @@ The HTTP listener can dispatch requests concurrently. The service uses different
 - `active_` is an atomically loaded/stored `shared_ptr`, giving each search or query a stable generation lifetime.
 - `mutation_` serializes ingestion requests.
 - candidate ingestion does its expensive work outside the active generation and only swaps after successful persistence.
-- rag-cpp's corpus permits concurrent read searches through shared locking and excludes mutation/build operations.
+- rag.cpp's corpus permits concurrent read searches through shared locking and excludes mutation/build operations.
 - hybrid retrieval internally overlaps its BM25 and dense branches.
 
-The current server does not yet expose queue sizes, work priorities, admission control, or `429` backpressure. On a mobile target, rag-cpp's process-wide worker pool also needs a configurable thread cap because its desktop default uses approximately all available CPU cores. A practical first mobile policy is one serialized writer and one or two bounded concurrent readers.
+The current server does not yet expose queue sizes, work priorities, admission control, or `429` backpressure. rag.cpp uses operation-local bounded workers and creates no process-global pool. Writers remain serialized by the compatibility adapters; the versioned C ABI reserves per-engine reader/writer and memory-budget fields for host policy.
 
 ## 9. Model backend contract
 
-The product build uses rag-cpp's OpenAI embedder adapter against a local HTTP server. A manually managed embedding backend must provide:
+The product build uses rag.cpp's OpenAI embedder adapter against a local HTTP server. A manually managed embedding backend must provide:
 
 - `GET /health`;
 - `POST /v1/embeddings` with the configured model name and vector dimension.
@@ -219,11 +235,11 @@ llama.cpp is the built and tested backend. Other local OpenAI-compatible servers
 
 ## 10. Test and specification enforcement
 
-The native test suite uses deterministic rag-cpp hash embeddings, temporary `.ragdb` files, and a small in-process HTTP generation stub. There is no `fake-llama-server` executable and no test-only public route.
+The native test suite uses deterministic rag.cpp hash embeddings, temporary `.ragdb` files, and a small in-process HTTP generation stub. There is no `fake-llama-server` executable and no test-only public route.
 
 Current scenarios cover:
 
-- C++17/C++23 boundary intent and loopback validation;
+- C++17/C++20 boundary intent and loopback validation;
 - persistence and reopen;
 - identical upsert and replacement;
 - idempotent deletion and exclusion from search;
@@ -236,7 +252,7 @@ Current scenarios cover:
 
 `lrs-spec-check` verifies pinned dependency revisions and ensures every active catalog entry names an existing test tag. It also scans normative specification lines and acceptance/exit criteria for stable requirement IDs.
 
-The suite is valuable but not yet the complete matrix described by the specification. In particular, there is no automated end-to-end test that starts the public coordinator executable with real GGUF models, no disconnect/capacity assertion through the public socket, and no sanitizer/coverage CI configuration committed here yet. `config/server.models.json` is the manual real-model smoke path.
+The suite is valuable but not yet the complete matrix described by the specification. There is no automated CI test that downloads and starts real GGUF models, no disconnect/capacity assertion through the public socket, and no sanitizer/coverage CI configuration committed here yet. `config/server.models.json` is the manual real-model smoke path. On 2026-08-07 the root-owned rag.cpp build passed that path with the configured Granite embedding and Qwen generation models: readiness, ingestion, hybrid retrieval, grounded completion with citations, full-process restart, and persisted reopen all succeeded.
 
 ## 11. Mobile and Android implementation
 
@@ -261,7 +277,7 @@ The current mobileAgent generation models do not expose an embedding API. Vector
 
 Without that model, the mobile bridge remains useful as a persisted BM25 store through `upsertLexical` and lexical search. It does not substitute hash vectors or generation-model output for semantic embeddings.
 
-The adjacent `../mobileAgent` repository already has a Dart lexical retrieval service and, through Flutter Gemma, LiteRT embeddings plus a qdrant-edge native vector store. rag-cpp should replace those retrieval layers if adopted, rather than becoming a third independent index.
+The adjacent `../mobileAgent` repository already has a Dart lexical retrieval service and, through Flutter Gemma, LiteRT embeddings plus a qdrant-edge native vector store. rag.cpp should replace those retrieval layers if adopted, rather than becoming a third independent index.
 
 The implemented mobile C ABI can:
 
@@ -277,7 +293,7 @@ The precomputed-vector C ABI keeps asynchronous Flutter inference outside C++. F
 
 For ordinary mobile chatbot retrieval, use CPU NEON plus HNSW for similarity. GPU/NPU effort should focus on embedding inference. A Vulkan/OpenCL vector-search backend is unlikely to improve single-query latency enough to justify its complexity.
 
-The pinned rag-cpp core and mobile bridge have been built with Android NDK 28.2, API 24, and run on a PLQ110 (`arm64-v8a`, Android API 36). A native on-device smoke test persisted a document and returned it through hybrid vector search with supplied vectors. A Flutter integration test then loaded the packaged library from mobileAgent, persisted a lexical document through Dart FFI, and retrieved it successfully. The stripped shared library is approximately 1.6 MB in the current build.
+The owned rag.cpp core and mobile bridge have been built with Android NDK 28.2, API 24, and run on a PLQ110 (`arm64-v8a`, Android API 36). A native on-device smoke test persisted a document and returned it through hybrid vector search with supplied vectors. A Flutter integration test then loaded the packaged library from mobileAgent, persisted a lexical document through Dart FFI, and retrieved it successfully. The stripped shared library is approximately 1.6 MB in the current build.
 
 `../mobileAgent/lib/retrieval/native_rag_index.dart` is the initial Dart wrapper. The Android APK packages the library through `android/app/src/main/jniLibs/arm64-v8a`. `tools/sync_mobile_agent_android.sh` rebuilds and copies the artifact.
 
@@ -286,7 +302,7 @@ Current mobile limitations:
 - operations on one native handle are serialized;
 - lexical-only and vector documents cannot be mixed in one index;
 - deletion, metadata filters, stats, and compaction are not exposed yet;
-- the bridge currently compiles the complete rag-cpp source target rather than a size-minimized source subset;
+- the explicit rag.cpp product source list should continue to be checked against mobile binary-size budgets;
 - mobileAgent's existing `RetrievalService` still owns production call sites; the native wrapper is available but has not replaced the Dart/qdrant paths;
 - the application must retain one embedding model identity and dimension for the lifetime of an index; a mobile manifest check is still needed;
 - Dart FFI calls that can persist or rebuild a large index should move to a dedicated isolate before production use.

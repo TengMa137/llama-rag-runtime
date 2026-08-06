@@ -6,6 +6,15 @@
 
 namespace lrs {
 namespace {
+std::size_t exact_token_count(void* context, const char* text, std::size_t length) {
+    const auto* client = static_cast<const ModelClient*>(context);
+    const auto tokens = client->tokenize_exact(std::string(text, length));
+    if (!tokens)
+        throw std::runtime_error("embedding backend exact tokenizer is unavailable");
+    return *tokens;
+}
+} // namespace
+namespace {
 std::shared_ptr<lrs_index> own(lrs_index* value) {
     return {value, [](lrs_index* index) { lrs_index_destroy(index); }};
 }
@@ -42,10 +51,16 @@ lrs_index_options Service::options() const {
             config_.embedding.port,
             config_.embedding_dimension,
             config_.deterministic_embeddings ? 1 : 0,
-            config_.embedding_api_model.c_str()};
+            config_.embedding_api_model.c_str(),
+            config_.embedding_context_size,
+            8,
+            config_.deterministic_embeddings ? nullptr : exact_token_count,
+            config_.deterministic_embeddings ? nullptr : const_cast<ModelClient*>(&embedding_)};
 }
 
 void Service::initialize() {
+    if (!config_.deterministic_embeddings && !embedding_.tokenize_exact("tokenizer capability"))
+        throw std::runtime_error("embedding backend exact tokenizer is unavailable");
     lrs_index* raw = nullptr;
     char* message = nullptr;
     const auto opts = options();

@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "k": 3,
+  "documents": [
+    {"id": "storage", "text": "The portable retrieval index is persisted in a ragdb file."},
+    {"id": "deletion", "text": "Deleting a document creates tombstones before compaction."},
+    {"id": "ranking", "text": "Hybrid retrieval fuses BM25 lexical and dense vector rankings."},
+    {"id": "unrelated", "text": "The harbor weather is calm today."}
+  ],
+  "queries": [
+    {"text": "portable persisted index", "relevant": ["storage"]},
+    {"text": "BM25 dense fusion", "relevant": ["ranking"]},
+    {"text": "document tombstones", "relevant": ["deletion"]}
+  ]
+}

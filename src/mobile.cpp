@@ -85,6 +85,12 @@ rag::index::CorpusConfig corpus_config() {
     config.chunk.max_chars = 384;
     config.chunk.overlap_lines = 4;
     config.chunk.heading_context = false;
+    config.chunk.policy.model_identity = "caller-supplied";
+    config.chunk.policy.tokenizer_identity = "conservative-utf8-bytes-v1";
+    config.chunk.policy.target_tokens = 320;
+    config.chunk.policy.max_tokens = 384;
+    config.chunk.policy.overlap_tokens = 32;
+    config.chunk.policy.counting_mode = rag::text::TokenCountingMode::conservative_utf8_bytes;
     config.chunking = rag::index::CorpusConfig::Chunking::fixed;
     return config;
 }

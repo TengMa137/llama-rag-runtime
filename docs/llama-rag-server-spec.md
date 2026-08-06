@@ -4,8 +4,8 @@
 **Target release:** v0.1  
 **Revision:** 2 — two-server inference topology and optional MTP  
 **Last updated:** 2026-08-04  
-**Primary components:** `llama.cpp` + `rag-cpp`  
-**Language boundary:** C++17 host, C++23 retrieval module
+**Primary components:** `llama.cpp` + `rag.cpp`
+**Language boundary:** C++17 host, C++20 retrieval module
 
 ---
 
@@ -14,7 +14,7 @@
 `llama-rag-server` is a lightweight native RAG coordinator that combines:
 
 - `llama.cpp` for GGUF model loading, embedding inference, answer generation, batching, scheduling, streaming, and optional speculative decoding;
-- `rag-cpp` for document and chunk storage, BM25 retrieval, dense-vector retrieval, HNSW indexing, metadata filtering, deletion, and persistence;
+- `rag.cpp` for document and chunk storage, BM25 retrieval, dense-vector retrieval, HNSW indexing, metadata filtering, deletion, and persistence;
 - a project-owned HTTP and orchestration layer that can be called directly by browser, desktop, mobile, or native clients without a Python or TypeScript runtime.
 
 The recommended v0.1 deployment exposes **one public RAG API** but runs **two local llama-server inference instances**:
@@ -22,13 +22,13 @@ The recommended v0.1 deployment exposes **one public RAG API** but runs **two lo
 1. an embedding server that owns the Granite or other embedding GGUF;
 2. a generation server that owns the Qwen or other chat/instruct GGUF.
 
-The RAG coordinator owns `rag-cpp`, ingestion, retrieval, context construction, citations, cancellation, and any future agent loop. The embedding and generation servers bind only to loopback or another private transport. This is one install, one launch command, and one public port, even though the implementation may use three operating-system processes.
+The RAG coordinator owns `rag.cpp`, ingestion, retrieval, context construction, citations, cancellation, and any future agent loop. The embedding and generation servers bind only to loopback or another private transport. This is one install, one launch command, and one public port, even though the implementation may use three operating-system processes.
 
 An optional MTP or standalone speculative draft model belongs inside the **generation server**. It does not require a third HTTP server. It may add another model or draft context, draft KV cache, and compute buffers inside that process, so it is an optional performance optimization rather than an agent-runtime component.
 
 The first release remains a **native RAG chatbot runtime**, not a general-purpose autonomous agent runtime. It supports deterministic ingestion, hybrid retrieval, grounded prompt construction, streamed generation, source citations, persistence, and operational controls. Bounded agentic retrieval can be added later above the same model and retrieval adapters.
 
-The project should be maintained as a separate superproject with pinned `llama.cpp` and `rag-cpp` dependencies. llama.cpp patches must remain small, reviewable, and limited to extension seams that cannot be implemented externally. <!-- [LRS-SPEC-001] -->
+The project should be maintained as a separate superproject with pinned `llama.cpp` and repository-owned `rag.cpp`. llama.cpp patches must remain small, reviewable, and limited to extension seams that cannot be implemented externally. <!-- [LRS-SPEC-001] -->
 
 ## 2. Problem statement
 
@@ -66,8 +66,8 @@ The proposed system exposes one native HTTP service that owns the complete reque
 - Keep modifications to llama.cpp isolated and reviewable.
 - Reuse llama-server scheduling, batching, cancellation, and streaming mechanisms.
 - Compile llama.cpp under its upstream C++17 baseline.
-- Compile rag-cpp and the bridge implementation under C++23.
-- Prevent C++23-only types from leaking into llama.cpp-facing headers.
+- Compile rag.cpp and the bridge implementation under C++20.
+- Prevent C++20-only types from leaking into llama.cpp-facing headers.
 - Avoid duplicate embedding-model contexts.
 - Provide deterministic configuration and reproducible builds.
 - Support sanitizer, fault-injection, and restart-recovery testing.
@@ -108,19 +108,23 @@ The implementation will pin a tested llama.cpp commit. The pin must be recorded 
 
 Current llama.cpp server architecture provides HTTP routing, request queues, response queues, parallel slots, shared batching, streaming, metrics, API keys, CORS controls, and multi-model router mode. The integration should reuse these components instead of creating a second inference scheduler. <!-- [LRS-SPEC-003] -->
 
-llama.cpp and ggml currently use C++17 as their baseline. The project must not globally force the entire superbuild to C++23. <!-- [LRS-SPEC-004] -->
+llama.cpp and ggml currently use C++17 as their baseline. The project must not globally force the entire superbuild to C++20. <!-- [LRS-SPEC-004] -->
 
-### 5.2 rag-cpp
+### 5.2 rag.cpp
 
-The initial validated baseline should be `rag-cpp` v0.1.0 or a later explicitly pinned commit. rag-cpp requires C++23 and CMake 3.24 or newer. It exposes a `ragcpp::ragcpp` CMake target and provides hybrid BM25 plus dense retrieval, HNSW, metadata support, deletion, a versioned `.ragdb` format, and pluggable embedders. <!-- [LRS-SPEC-005] -->
+The owned baseline is derived from rag-cpp v0.1.0 commit
+`cfe46cee87fccb9ca5dee68d416229489285fdea`. rag.cpp requires C++20 and CMake
+3.24 or newer. It exposes `rag::rag` plus the transitional `ragcpp::ragcpp`
+alias and provides hybrid BM25 plus dense retrieval, HNSW, metadata support,
+deletion, and versioned `.ragdb` persistence. <!-- [LRS-SPEC-005] -->
 
-Because rag-cpp is a young dependency, the project must: <!-- [LRS-SPEC-006] -->
+Because rag.cpp is a young dependency, the project must: <!-- [LRS-SPEC-006] -->
 
 - pin an exact tag and commit hash;
 - run its tests in the integration CI;
 - treat storage compatibility as validated per pinned version, not assumed indefinitely;
 - wrap its public API behind project-owned interfaces;
-- avoid exposing rag-cpp types in the public server API;
+- avoid exposing rag.cpp types in the public server API;
 - maintain an escape path to replace or fork the retrieval implementation.
 
 ### 5.3 Dependency update policy
@@ -142,7 +146,7 @@ Dependency updates require:
 flowchart LR
     Client[Frontend or Native Client]
     Public[llama-rag-server<br/>Public API and RAG Coordinator]
-    Rag[rag-cpp Engine]
+    Rag[rag.cpp Engine]
     Store[(knowledge.ragdb)]
     Embed[Embedding llama-server<br/>Granite or configured embedder]
     Gen[Generation llama-server<br/>Qwen or configured LLM]
@@ -165,7 +169,7 @@ flowchart LR
 - TLS, authentication, request IDs, and explicit browser CORS policy;
 - document normalization and chunking;
 - ingestion transactions and durability policy;
-- `rag-cpp` database lifecycle;
+- `rag.cpp` database lifecycle;
 - lexical and dense retrieval orchestration;
 - context budgeting and prompt construction;
 - source citation mapping;
@@ -196,7 +200,7 @@ flowchart LR
 - main and draft KV caches and compute buffers;
 - inference cancellation and model-specific metrics.
 
-#### rag-cpp owns
+#### rag.cpp owns
 
 - normalized document and chunk records;
 - lexical indexing;
@@ -244,9 +248,9 @@ llama-rag-runtime/
 ├── packaging/
 ├── patches/
 │   └── llama.cpp/
+├── rag.cpp/             # repository-owned retrieval core
 └── third_party/
-    ├── llama.cpp/      # pinned Git submodule or fetched dependency
-    └── rag-cpp/        # pinned Git submodule or fetched dependency
+    └── llama.cpp/       # pinned Git submodule or fetched dependency
 ```
 
 The outer repository owns the product version, API stability, integration tests, packaging, process supervision, and dependency pins. This also keeps open the option to replace or fork either dependency.
@@ -257,7 +261,7 @@ The normal RAG chatbot deployment consists of:
 
 ```text
 llama-rag-server              public coordinator process
-├── rag-cpp + knowledge.ragdb
+├── rag.cpp + knowledge.ragdb
 ├── private embedding client ─────► embedding llama-server process
 └── private generation client ────► generation llama-server process
                                       └── optional MTP/draft context
@@ -312,7 +316,7 @@ It may:
 2. start or attach to the private generation server;
 3. wait for both health checks;
 4. validate model and index compatibility;
-5. open `rag-cpp`;
+5. open `rag.cpp`;
 6. expose the public RAG API;
 7. forward shutdown and cancellation;
 8. report child-process failures clearly.
@@ -341,25 +345,25 @@ Avoid changes to:
 
 Where upstream lacks an extension seam, prefer a small generic hook that could plausibly be contributed upstream rather than a RAG-specific invasive patch.
 
-## 8. C++17 and C++23 boundary
+## 8. C++17 and C++20 boundary
 
 ### 8.1 Constraint
 
 - llama.cpp target code remains C++17.
-- rag-cpp requires C++23.
-- rag-cpp publicly uses C++23 features such as concepts and `std::expected`.
-- Linking `ragcpp::ragcpp` directly to a llama.cpp server target may propagate the `cxx_std_23` compile feature.
+- rag.cpp requires C++20.
+- rag.cpp publicly uses C++20 features such as concepts and the owned `Result<T>` value.
+- Linking `rag::rag` directly to a llama.cpp server target propagates the `cxx_std_20` compile feature.
 
 ### 8.2 Required approach
 
-Create a dedicated C++23 bridge library. The bridge implementation may include rag-cpp headers, but the bridge's public headers must be valid C++17 or C. <!-- [LRS-SPEC-015] -->
+Create a dedicated C++20 bridge library. The bridge implementation may include rag.cpp headers, but the bridge's public headers must be valid C++17 or C. <!-- [LRS-SPEC-015] -->
 
 ```mermaid
 flowchart LR
     Server[llama-rag-server C++17]
     API[rag_bridge.h C-compatible]
-    Impl[rag_bridge.cpp C++23]
-    RAG[ragcpp::ragcpp C++23]
+    Impl[rag_bridge.cpp C++20]
+    RAG[rag::rag C++20]
 
     Server --> API
     API --> Impl
@@ -370,11 +374,11 @@ flowchart LR
 
 The bridge boundary must not expose: <!-- [LRS-SPEC-016] -->
 
-- `std::expected`;
-- C++20 or C++23 concepts;
+- owned C++ result/error values;
+- C++20 or C++20 concepts;
 - ranges or views;
 - `std::span` in C-facing APIs;
-- rag-cpp classes;
+- rag.cpp classes;
 - STL containers whose ownership crosses module boundaries;
 - exceptions across the ABI boundary;
 - allocator-dependent object ownership;
@@ -444,7 +448,7 @@ For result data, choose one policy and use it consistently:
 - caller-provided output buffers; or
 - bridge-owned immutable result objects with explicit `destroy` calls.
 
-Bridge-owned result objects are simpler for variable-length search results. They must remain valid until explicitly destroyed and must never refer to temporary rag-cpp storage. <!-- [LRS-SPEC-018] -->
+Bridge-owned result objects are simpler for variable-length search results. They must remain valid until explicitly destroyed and must never refer to temporary rag.cpp storage. <!-- [LRS-SPEC-018] -->
 
 ---
 
@@ -459,9 +463,9 @@ llama-rag-runtime/
 │   ├── Dependencies.cmake
 │   ├── BuildInfo.cmake
 │   └── Packaging.cmake
+├── rag.cpp/             # repository-owned retrieval core
 ├── third_party/
-│   ├── llama.cpp/
-│   └── rag-cpp/
+│   └── llama.cpp/
 ├── src/
 │   ├── main.cpp
 │   ├── supervisor/
@@ -496,7 +500,7 @@ llama-rag-runtime/
 └── licenses/
 ```
 
-`third_party/llama.cpp` and `third_party/rag-cpp` should normally be pinned Git submodules or reproducible fetched dependencies. The `patches/` directory must remain empty unless a tested upstream extension is genuinely required. <!-- [LRS-SPEC-019] -->
+`third_party/llama.cpp` should remain a pinned Git submodule. `rag.cpp` is tracked, repository-owned source with recorded provenance. The `patches/` directory must remain empty unless a tested upstream extension is genuinely required. <!-- [LRS-SPEC-019] -->
 
 ### 9.2 CMake sketch
 
@@ -513,22 +517,15 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(LLAMA_BUILD_SERVER ON CACHE BOOL "" FORCE)
 add_subdirectory(third_party/llama.cpp EXCLUDE_FROM_ALL)
 
-# Build only the rag-cpp core needed by the coordinator.
-set(RAGCPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(RAGCPP_BUILD_BENCH OFF CACHE BOOL "" FORCE)
-set(RAGCPP_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(RAGCPP_BUILD_CLI OFF CACHE BOOL "" FORCE)
-set(RAGCPP_WITH_RCP OFF CACHE BOOL "" FORCE)
-set(RAGCPP_WITH_ONNX OFF CACHE BOOL "" FORCE)
-set(RAGCPP_WITH_LLAMA OFF CACHE BOOL "" FORCE)
-add_subdirectory(third_party/rag-cpp EXCLUDE_FROM_ALL)
+# Build the explicit rag.cpp product-core source list.
+add_subdirectory(rag.cpp)
 
-# Only this target includes rag-cpp C++23 headers.
+# Only this target includes rag.cpp C++20 headers.
 add_library(llama_rag_bridge STATIC
     src/rag/rag_bridge.cpp
 )
-target_compile_features(llama_rag_bridge PRIVATE cxx_std_23)
-target_link_libraries(llama_rag_bridge PRIVATE ragcpp::ragcpp)
+target_compile_features(llama_rag_bridge PRIVATE cxx_std_20)
+target_link_libraries(llama_rag_bridge PRIVATE rag::rag)
 target_include_directories(llama_rag_bridge PUBLIC src/rag)
 
 # The public coordinator remains C++17-facing.
@@ -549,7 +546,7 @@ target_link_libraries(llama-rag-server PRIVATE llama_rag_bridge)
 
 The coordinator may invoke the built `llama-server` executable as a child process. It does not need to link directly to private llama-server implementation targets for the first prototype. Direct linkage should be introduced only when it offers a clear maintenance or performance advantage on the pinned upstream revision. <!-- [LRS-SPEC-020] -->
 
-### 9.3 rag-cpp llama backend policy
+### 9.3 rag.cpp llama backend policy
 
 Build with:
 
@@ -557,7 +554,7 @@ Build with:
 RAGCPP_WITH_LLAMA=OFF
 ```
 
-The project must not instantiate rag-cpp's in-process GGUF embedder in v0.1. Instead, it will provide a project-owned embedder adapter that invokes the embedding model through llama-server's runtime. <!-- [LRS-SPEC-021] -->
+The project must not instantiate rag.cpp's in-process GGUF embedder in v0.1. Instead, it will provide a project-owned embedder adapter that invokes the embedding model through llama-server's runtime. <!-- [LRS-SPEC-021] -->
 
 This avoids:
 
@@ -571,22 +568,22 @@ This avoids:
 
 ### 9.4 Compiler support
 
-Minimum expected toolchains should follow the selected rag-cpp release. For the initial baseline: <!-- [LRS-SPEC-022] -->
+Minimum expected toolchains should follow the selected rag.cpp release. For the initial baseline: <!-- [LRS-SPEC-022] -->
 
 - GCC 13 or newer;
 - Clang 17 or newer;
-- a standard library with required C++23 support;
+- a standard library with required C++20 support;
 - CMake 3.24 or newer.
 
-MSVC support must be validated against rag-cpp's actual release CI before being declared supported. The initial release may classify Windows as experimental if the complete server integration is not continuously tested. <!-- [LRS-SPEC-023] -->
+MSVC support must be validated against rag.cpp's actual release CI before being declared supported. The initial release may classify Windows as experimental if the complete server integration is not continuously tested. <!-- [LRS-SPEC-023] -->
 
 ### 9.5 Android library boundary
 
-Android integration must expose rag-cpp through a project-owned shared C ABI and run in the application process; it must not require the coordinator executable or llama.cpp when Flutter supplies generation and embeddings. <!-- [LRS-MOBILE-001] -->
+Android integration must expose rag.cpp through a project-owned shared C ABI and run in the application process; it must not require the coordinator executable or llama.cpp when Flutter supplies generation and embeddings. <!-- [LRS-MOBILE-001] -->
 
 The mobile bridge must accept precomputed document-chunk and query vectors so asynchronous Flutter embedding runtimes do not have to execute through a synchronous native-to-Dart callback. <!-- [LRS-MOBILE-002] -->
 
-The initial Android build should target `arm64-v8a`, keep model inference outside rag-cpp, and persist its `.ragdb` in application-private storage. <!-- [LRS-SPEC-073] -->
+The initial Android build should target `arm64-v8a`, keep model inference outside rag.cpp, and persist its `.ragdb` in application-private storage. <!-- [LRS-SPEC-073] -->
 
 ---
 
@@ -594,7 +591,7 @@ The initial Android build should target `arm64-v8a`, keep model inference outsid
 
 ### 10.1 RAG service
 
-`RagService` is the project-owned orchestration component. It must not expose rag-cpp types to HTTP routes. <!-- [LRS-SPEC-024] -->
+`RagService` is the project-owned orchestration component. It must not expose rag.cpp types to HTTP routes. <!-- [LRS-SPEC-024] -->
 
 Conceptual C++17 interface:
 
@@ -629,7 +626,7 @@ Responsibilities:
 - record queue, inference, and transport latency;
 - distinguish transient model unavailability from permanent configuration errors.
 
-The adapter serves both document ingestion and query embeddings, with separate concurrency and priority policies. It must not create a second in-process Granite model through rag-cpp. <!-- [LRS-SPEC-025] -->
+The adapter serves both document ingestion and query embeddings, with separate concurrency and priority policies. It must not create a second in-process Granite model through rag.cpp. <!-- [LRS-SPEC-025] -->
 
 ### 10.3 Generation runtime adapter
 
@@ -652,7 +649,7 @@ The generation client treats MTP or a standalone draft model as an implementatio
 
 ### 10.4 Retrieval bridge
 
-The retrieval bridge wraps rag-cpp operations and converts between project-owned POD structures and rag-cpp types.
+The retrieval bridge wraps rag.cpp operations and converts between project-owned POD structures and rag.cpp types.
 
 Required operations:
 
@@ -701,7 +698,7 @@ These roles should run as two llama-server inference instances because they use 
 ```mermaid
 flowchart TD
     Public[llama-rag-server<br/>RAG coordinator]
-    Rag[rag-cpp + .ragdb]
+    Rag[rag.cpp + .ragdb]
     Embed[Embedding llama-server process]
     Gen[Generation llama-server process]
     Main[Main LLM model/context]
@@ -823,9 +820,9 @@ The initial release should establish a correct baseline without speculative deco
 
 ### 12.1 Primary storage
 
-Use a rag-cpp `.ragdb` file as the primary retrieval store for v0.1.
+Use a rag.cpp `.ragdb` file as the primary retrieval store for v0.1.
 
-The index contains document, chunk, embedding, BM25, HNSW, and tombstone data according to the pinned rag-cpp storage format. The package must also include a project-owned manifest so model and chunking compatibility are explicit even if rag-cpp's internal metadata does not include every required field. <!-- [LRS-SPEC-034] -->
+The index contains document, chunk, embedding, BM25, HNSW, and tombstone data according to the owned rag.cpp storage format. The package must also include a project-owned manifest so model and chunking compatibility are explicit even if rag.cpp's internal metadata does not include every required field. <!-- [LRS-SPEC-034] -->
 
 ### 12.2 Package layout
 
@@ -954,7 +951,7 @@ Rules:
 - maximum length is configurable, default 256 bytes;
 - IDs must not contain control characters; <!-- [LRS-SPEC-041] -->
 - the API treats repeated `POST /documents` with the same ID as replace/upsert;
-- internal rag-cpp numeric IDs are implementation details and never exposed as durable public IDs.
+- internal rag.cpp numeric IDs are implementation details and never exposed as durable public IDs.
 
 ### 13.2 Document fields
 
@@ -1872,7 +1869,7 @@ CPU file-backed pages may appear shared between processes depending on the opera
 - Accept request bodies into bounded buffers.
 - Avoid repeated JSON serialization inside the coordinator.
 - Pass immutable views within one language-standard boundary.
-- Copy data explicitly across the C++17/C++23 bridge only when lifetime safety requires it.
+- Copy data explicitly across the C++17/C++20 bridge only when lifetime safety requires it.
 - Batch embeddings without concatenating all document text into one giant allocation.
 - Stream answer tokens rather than buffering the complete answer.
 - Do not proxy the draft-token stream; the generation server returns only verified output.
@@ -2006,7 +2003,7 @@ v0.1 is ready when all of the following are true:
 
 - A clean checkout builds with documented toolchains. <!-- [LRS-AC-001] -->
 - llama.cpp project targets remain C++17. <!-- [LRS-AC-002] -->
-- Only the bridge and rag-cpp targets require C++23. <!-- [LRS-AC-003] -->
+- Only the bridge and rag.cpp targets require C++20. <!-- [LRS-AC-003] -->
 - The package runs without Python, Node.js, Java, Redis, or an external vector DB. <!-- [LRS-AC-004] -->
 - Licenses and exact dependency revisions are included. <!-- [LRS-AC-005] -->
 
@@ -2054,18 +2051,18 @@ v0.1 is ready when all of the following are true:
 Deliverables:
 
 - separate top-level superproject;
-- pinned llama.cpp and rag-cpp revisions;
+- pinned llama.cpp revision and recorded rag.cpp provenance;
 - reproducible build of `llama-server` and the coordinator;
 - private embedding and generation servers started manually;
-- C++17/C++23 bridge proving open/add/search/close;
+- C++17/C++20 bridge proving open/add/search/close;
 - process-tree memory baseline with no model, one model, and two models loaded;
 - documented exact commands for the pinned llama.cpp commit.
 
 Exit criteria:
 
 - llama.cpp remains on its upstream language standard; <!-- [LRS-PHASE-001] -->
-- rag-cpp compiles in C++23; <!-- [LRS-PHASE-002] -->
-- no rag-cpp public header is included by a C++17 target; <!-- [LRS-PHASE-003] -->
+- rag.cpp compiles in C++20; <!-- [LRS-PHASE-002] -->
+- no rag.cpp public header is included by a C++17 target; <!-- [LRS-PHASE-003] -->
 - both private model servers pass health checks; <!-- [LRS-PHASE-004] -->
 - coordinator can call both through loopback HTTP. <!-- [LRS-PHASE-005] -->
 
@@ -2076,7 +2073,7 @@ Build the smallest useful path before implementing full ingestion:
 ```text
 POST /v1/rag/search
   → embed query through private embedding server
-  → search a small prebuilt rag-cpp index
+  → search a small prebuilt rag.cpp index
   → return ranked chunks and source IDs
 ```
 
@@ -2187,19 +2184,19 @@ Exit criteria:
 
 ## 26. Risks and mitigations
 
-### 26.1 rag-cpp maturity
+### 26.1 rag.cpp maturity
 
 **Risk:** API or storage behavior changes quickly.  
-**Mitigation:** pin exact commits, own the bridge, retain compatibility fixtures, and be prepared to carry a small fork.
+**Mitigation:** own the core, record provenance, retain compatibility fixtures, and review storage changes explicitly.
 
 ### 26.2 C++ standard leakage
 
-**Risk:** `cxx_std_23` propagates into llama.cpp targets.  
-**Mitigation:** only link rag-cpp to the private bridge and validate compile commands in CI.
+**Risk:** `cxx_std_20` propagates into llama.cpp targets.
+**Mitigation:** only link rag.cpp to the private bridge and validate compile commands in CI.
 
 ### 26.3 duplicate embedding model
 
-**Risk:** rag-cpp's GGUF embedder creates another llama model context.  
+**Risk:** rag.cpp's GGUF embedder creates another llama model context.
 **Mitigation:** disable `RAGCPP_WITH_LLAMA` and provide precomputed embeddings through the project adapter.
 
 ### 26.4 router-mode instability
@@ -2295,8 +2292,8 @@ The following decisions should be finalized during Phase 0 or Phase 1: <!-- [LRS
 1. Whether the coordinator supervises two fixed private llama-server processes or attaches to an independently managed/router-mode deployment.
 2. Whether the first transport is TCP loopback HTTP or a Unix-domain socket where supported.
 3. Whether a later direct queue/in-process gateway provides enough measured benefit to justify stronger llama.cpp coupling.
-4. Whether rag-cpp accepts clean insertion of externally computed embeddings at the pinned revision or needs a small adapter/fork.
-5. Exact transaction strategy around rag-cpp mutation and `.ragdb` persistence.
+4. Whether rag.cpp accepts clean insertion of externally computed embeddings at the pinned revision or needs a small adapter/fork.
+5. Exact transaction strategy around rag.cpp mutation and `.ragdb` persistence.
 6. Supported operating systems for v0.1.
 7. Exact Granite embedding GGUF, pooling strategy, dimensions, and conversion provenance.
 8. Exact Qwen GGUF, chat template, context size, and quantization.
@@ -2312,7 +2309,7 @@ The following decisions should be finalized during Phase 0 or Phase 1: <!-- [LRS
 For the first implementation, use these defaults:
 
 - separate `llama-rag-runtime` superproject;
-- pinned `third_party/llama.cpp` and `third_party/rag-cpp`;
+- pinned `third_party/llama.cpp` and owned `rag.cpp`;
 - no llama.cpp source patch for the first HTTP-based vertical slice;
 - one public `llama-rag-server` coordinator;
 - one private embedding llama-server;
@@ -2322,7 +2319,7 @@ For the first implementation, use these defaults:
 - speculative decoding disabled initially;
 - one generation process with `--parallel 1` until concurrency is measured;
 - llama.cpp remains on its upstream C++ baseline;
-- rag-cpp stays behind a C++23 private bridge with a C-compatible boundary;
+- rag.cpp stays behind a C++20 private bridge with a C-compatible boundary;
 - `RAGCPP_WITH_LLAMA=OFF`;
 - hybrid BM25 plus HNSW retrieval with RRF;
 - deterministic token-window chunking;
@@ -2341,12 +2338,12 @@ For the first implementation, use these defaults:
 - llama.cpp server developer architecture: <https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README-dev.md>
 - llama.cpp speculative decoding documentation: <https://github.com/ggml-org/llama.cpp/blob/master/docs/speculative.md>
 - llama.cpp ggml CMake configuration: <https://github.com/ggml-org/llama.cpp/blob/master/ggml/CMakeLists.txt>
-- rag-cpp repository: <https://github.com/1ay1/rag-cpp>
-- rag-cpp v0.1.0 tag: <https://github.com/1ay1/rag-cpp/releases/tag/v0.1.0>
-- rag-cpp CMake configuration: <https://github.com/1ay1/rag-cpp/blob/main/CMakeLists.txt>
-- rag-cpp storage format: <https://github.com/1ay1/rag-cpp/blob/main/FORMAT.md>
-- rag-cpp architecture: <https://github.com/1ay1/rag-cpp/blob/main/ARCHITECTURE.md>
-- rag-cpp C API: <https://github.com/1ay1/rag-cpp/blob/main/include/rag/c/rag.h>
+- upstream rag-cpp repository: <https://github.com/1ay1/rag-cpp>
+- upstream rag-cpp v0.1.0 tag: <https://github.com/1ay1/rag-cpp/releases/tag/v0.1.0>
+- owned provenance: `rag.cpp/PROVENANCE.md`
+- owned storage format: `rag.cpp/FORMAT.md`
+- owned architecture: `rag.cpp/ARCHITECTURE.md`
+- owned C API: `rag.cpp/include/rag/c/rag.h`
 
 ---
 
@@ -2360,7 +2357,7 @@ sequenceDiagram
     participant H as Public RAG API
     participant S as RagService
     participant E as Embedding llama-server
-    participant R as rag-cpp Bridge
+    participant R as rag.cpp Bridge
     participant D as .ragdb
 
     C->>H: POST /v1/rag/documents
@@ -2384,7 +2381,7 @@ sequenceDiagram
     participant H as Public RAG API
     participant S as RagService
     participant E as Embedding llama-server
-    participant R as rag-cpp Bridge
+    participant R as rag.cpp Bridge
     participant G as Generation llama-server
     participant D as Optional internal draft/MTP context
 
@@ -2468,16 +2465,16 @@ The command remains one generation server. The draft context is internal and is 
 ## Appendix C: release checklist
 
 - [ ] Pin llama.cpp commit.
-- [ ] Pin rag-cpp tag and commit.
+- [ ] Verify rag.cpp provenance and owned change log.
 - [ ] Record compiler and standard-library versions.
 - [ ] Verify the coordinator repository is independent of the llama.cpp source tree.
-- [ ] Verify C++17 targets are not compiled as C++23.
-- [ ] Verify rag-cpp headers are isolated behind the bridge.
+- [ ] Verify C++17 targets are not compiled as C++20.
+- [ ] Verify rag.cpp headers are isolated behind the bridge.
 - [ ] Verify exactly one embedding llama-server is active.
 - [ ] Verify exactly one generation llama-server is active for the default profile.
 - [ ] Verify MTP/draft mode does not create a third listening server.
 - [ ] Measure total process-tree RSS and VRAM.
-- [ ] Run rag-cpp upstream tests.
+- [ ] Run the owned rag.cpp core, compatibility, and qrels tests.
 - [ ] Run bridge unit tests.
 - [ ] Run model-client timeout and cancellation tests.
 - [ ] Run child-process startup, crash, restart, and shutdown tests.

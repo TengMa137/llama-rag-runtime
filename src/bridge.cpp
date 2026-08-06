@@ -5,6 +5,7 @@
 #include <rag/engine.hpp>
 #include <rag/pipeline/pipeline.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -67,7 +68,7 @@ std::string public_chunk_id(const rag::SearchResult& hit) {
     return "chk_" + encoded;
 }
 
-rag::index::CorpusConfig corpus_config() {
+rag::index::CorpusConfig corpus_config(const lrs_index_options& options) {
     rag::index::CorpusConfig cfg;
     cfg.chunk.max_lines = 40;
     // The bundled Granite embedding model has a hard 512-token training
@@ -76,6 +77,28 @@ rag::index::CorpusConfig corpus_config() {
     cfg.chunk.max_chars = 384;
     cfg.chunk.overlap_lines = 4;
     cfg.chunk.heading_context = false;
+    cfg.chunk.policy.model_identity = options.embedding_model ? options.embedding_model : "default";
+    cfg.chunk.policy.dimension = options.embedding_dimension;
+    if (options.measure_tokens != nullptr && options.max_input_tokens > options.reserved_tokens) {
+        cfg.chunk.policy.tokenizer_identity = "backend-exact-v1";
+        cfg.chunk.policy.max_tokens = options.max_input_tokens;
+        cfg.chunk.policy.reserved_tokens = options.reserved_tokens;
+        const auto usable = options.max_input_tokens - options.reserved_tokens;
+        cfg.chunk.policy.target_tokens = std::max<std::size_t>(1, usable * 3 / 4);
+        cfg.chunk.policy.overlap_tokens = usable / 8;
+        cfg.chunk.policy.counting_mode = rag::text::TokenCountingMode::exact;
+        const auto callback = options.measure_tokens;
+        void* const context = options.token_measurer_context;
+        cfg.chunk.measure_tokens = [callback, context](std::string_view text) {
+            return callback(context, text.data(), text.size());
+        };
+    } else {
+        cfg.chunk.policy.tokenizer_identity = "conservative-utf8-bytes-v1";
+        cfg.chunk.policy.target_tokens = 320;
+        cfg.chunk.policy.max_tokens = 384;
+        cfg.chunk.policy.overlap_tokens = 32;
+        cfg.chunk.policy.counting_mode = rag::text::TokenCountingMode::conservative_utf8_bytes;
+    }
     cfg.chunking = rag::index::CorpusConfig::Chunking::fixed;
     return cfg;
 }
@@ -99,21 +122,33 @@ std::unique_ptr<rag::Engine> load_engine(const lrs_index_options& options) {
         if (!loaded)
             throw std::runtime_error(loaded.error().message);
         engine = std::make_unique<rag::Engine>(std::move(*loaded));
+        const auto& stored = engine->corpus().config().chunk;
+        if (stored.policy.max_tokens != 0 &&
+            rag::text::chunking_fingerprint(stored) !=
+                rag::text::chunking_fingerprint(corpus_config(options).chunk))
+            throw std::runtime_error("embedded chunking/embedding policy is incompatible");
     } else {
-        engine = std::make_unique<rag::Engine>(corpus_config());
+        engine = std::make_unique<rag::Engine>(corpus_config(options));
     }
     attach_embedder(*engine, options);
     return engine;
 }
 
 void write_manifest(const lrs_index_options& options) {
+    const auto cfg = corpus_config(options);
     nlohmann::json manifest = {{"schema", 1},
-                               {"rag_cpp", "v0.1.0"},
-                               {"chunking", "ragcpp-fixed-v0.1.0"},
+                               {"rag_cpp", "owned-v0.1.1"},
+                               {"source_commit", "cfe46cee87fccb9ca5dee68d416229489285fdea"},
+                               {"chunking", rag::text::chunking_fingerprint(cfg.chunk)},
                                {"max_lines", 40},
                                {"max_chars", 384},
                                {"overlap_lines", 4},
                                {"heading_context", false},
+                               {"target_tokens", cfg.chunk.policy.target_tokens},
+                               {"max_tokens", cfg.chunk.policy.max_tokens},
+                               {"overlap_tokens", cfg.chunk.policy.overlap_tokens},
+                               {"tokenizer", cfg.chunk.policy.tokenizer_identity},
+                               {"model", cfg.chunk.policy.model_identity},
                                {"embedding_dimension", options.embedding_dimension}};
     const std::string final_path = std::string(options.database_path) + ".manifest.json";
     const std::string temporary = final_path + ".tmp";
@@ -134,8 +169,13 @@ void validate_manifest(const lrs_index_options& options) {
         throw std::runtime_error("index manifest is missing");
     nlohmann::json manifest;
     input >> manifest;
-    if (manifest.value("schema", 0) != 1 || manifest.value("rag_cpp", "") != "v0.1.0" ||
-        manifest.value("chunking", "") != "ragcpp-fixed-v0.1.0" ||
+    const auto cfg = corpus_config(options);
+    const bool legacy = manifest.value("rag_cpp", "") == "v0.1.0" &&
+                        manifest.value("chunking", "") == "ragcpp-fixed-v0.1.0";
+    const bool current =
+        manifest.value("rag_cpp", "") == "owned-v0.1.1" &&
+        manifest.value("chunking", "") == rag::text::chunking_fingerprint(cfg.chunk);
+    if (manifest.value("schema", 0) != 1 || (!legacy && !current) ||
         manifest.value("embedding_dimension", 0U) != options.embedding_dimension ||
         manifest.value("max_lines", 0U) != 40U || manifest.value("max_chars", 0U) != 384U ||
         manifest.value("overlap_lines", 0U) != 4U || manifest.value("heading_context", true))

@@ -34,13 +34,11 @@ int main() {
     try {
         const std::string root = LRS_SOURCE_DIR;
         const auto catalog = nlohmann::json::parse(read(root + "/requirements.json"));
-        if (catalog.at("dependencies").at("llama.cpp") != LRS_LLAMA_PIN ||
-            catalog.at("dependencies").at("rag-cpp") != LRS_RAGCPP_PIN) {
+        if (catalog.at("dependencies").at("llama.cpp") != LRS_LLAMA_PIN) {
             std::cerr << "dependency pin differs from build metadata\n";
             return 1;
         }
-        if (revision(root, "llama.cpp") != LRS_LLAMA_PIN ||
-            revision(root, "rag-cpp") != LRS_RAGCPP_PIN) {
+        if (revision(root, "llama.cpp") != LRS_LLAMA_PIN) {
             std::cerr << "checked-out dependency differs from recorded build metadata\n";
             return 1;
         }
