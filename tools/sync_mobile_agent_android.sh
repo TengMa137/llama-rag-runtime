@@ -27,13 +27,13 @@ cmake --preset android-arm64
 cmake --build --preset android-arm64
 cmake -E make_directory "${destination}"
 cmake -E copy_if_different \
-    "${repository_root}/build/android-arm64/lib/libragcpp_mobile.so" \
-    "${destination}/libragcpp_mobile.so"
+    "${repository_root}/build/android-arm64/lib/librag_mobile.so" \
+    "${destination}/librag_mobile.so"
 
 strip_tool="$(find "${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt" \
     -path '*/bin/llvm-strip' \( -type f -o -type l \) -print -quit)"
 if [[ -n "${strip_tool}" ]]; then
-    "${strip_tool}" --strip-unneeded "${destination}/libragcpp_mobile.so"
+    "${strip_tool}" --strip-unneeded "${destination}/librag_mobile.so"
 fi
 
-echo "Installed ${destination}/libragcpp_mobile.so"
+echo "Installed ${destination}/librag_mobile.so"

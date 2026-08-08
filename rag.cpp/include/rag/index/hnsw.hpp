@@ -16,8 +16,8 @@
 //   • Serialization — adjacency lists + normalized vectors persist to a blob;
 //     re-opening a corpus does not rebuild the graph.
 
-#include <cstdint>
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <random>
 #include <span>
@@ -33,8 +33,8 @@
 namespace rag::index {
 
 struct HnswConfig {
-    std::size_t M               = 16;    // max neighbours per node (base layer 2M)
-    std::size_t ef_construction = 200;   // beam width during insert
+    std::size_t M = 16;                // max neighbours per node (base layer 2M)
+    std::size_t ef_construction = 200; // beam width during insert
     // Default beam width during query; overridable per call (see search()).
     // This is THE recall/latency dial.
     //
@@ -65,10 +65,10 @@ struct HnswConfig {
     // 0.815, i.e. near-duplicates — where every graph scores ~0.99 and the
     // number says nothing. Do not restate a recall figure here without naming
     // the dataset it was measured on.
-    std::size_t ef_search       = 64;
-    float       ml              = 0.0f;  // level multiplier; 0 => 1/ln(M)
-    std::size_t matryoshka_dim  = 0;     // >0: walk on this leading-dim prefix
-    bool        binary          = false; // 1-bit sign codes for the walk
+    std::size_t ef_search = 64;
+    float ml = 0.0f;                // level multiplier; 0 => 1/ln(M)
+    std::size_t matryoshka_dim = 0; // >0: walk on this leading-dim prefix
+    bool binary = false;            // 1-bit sign codes for the walk
     // >0: walk on Product Quantization codes of this many bytes per vector
     // (must divide dim). PQ splits a vector into m subspaces and stores each as
     // one byte (its nearest of 256 centroids), so a vector costs m bytes
@@ -96,7 +96,7 @@ struct HnswConfig {
     // As with SQ8, codes only ORDER the walk; the returned top-k is rescored
     // on the most precise representation still resident, so scores stay exact
     // unless drop_floats removed the floats.
-    std::size_t pq_codes        = 0;
+    std::size_t pq_codes = 0;
     // Discard the exact float arena once a compressed representation exists,
     // keeping only the codes. Works with or without PQ:
     //
@@ -110,12 +110,12 @@ struct HnswConfig {
     // The cost is that reported scores become approximate: with no exact
     // vectors left there is nothing to rescore against. Off by default —
     // exactness first.
-    bool        drop_floats     = false;
-    std::uint64_t seed          = 0x9E3779B97F4A7C15ull;
+    bool drop_floats = false;
+    std::uint64_t seed = 0x9E3779B97F4A7C15ull;
 };
 
 class HnswIndex {
-public:
+  public:
     HnswIndex() = default;
     explicit HnswIndex(HnswConfig cfg);
 
@@ -185,11 +185,11 @@ public:
     // `ef_boost` widens the beam (× multiplier) to compensate for selective
     // filters; pass a larger value when `allow` accepts a small fraction.
     using AllowFn = std::function<bool(std::uint32_t id)>;
-    [[nodiscard]] std::vector<Hit>
-    search_filtered(std::span<const float> query, std::size_t k,
-                    const AllowFn& allow, float ef_boost = 4.0f) const;
+    [[nodiscard]] std::vector<Hit> search_filtered(std::span<const float> query, std::size_t k,
+                                                   const AllowFn& allow,
+                                                   float ef_boost = 4.0f) const;
 
-    [[nodiscard]] std::size_t size()      const noexcept { return nodes_.size(); }
+    [[nodiscard]] std::size_t size() const noexcept { return nodes_.size(); }
     [[nodiscard]] std::size_t dimension() const noexcept { return dim_; }
 
     // Bytes of heap actually held by the index, broken down by component.
@@ -199,12 +199,12 @@ public:
     // off — and the breakdown matters because which term dominates flips once
     // the vectors are compressed.
     struct MemoryUse {
-        std::size_t vectors = 0;   // float arena
-        std::size_t sq8     = 0;   // SQ8 mirror
-        std::size_t pq      = 0;   // PQ codes + codebook
-        std::size_t links   = 0;   // mutable vector-of-vectors adjacency
-        std::size_t csr     = 0;   // sealed CSR adjacency
-        std::size_t nodes   = 0;   // node headers
+        std::size_t vectors = 0; // float arena
+        std::size_t sq8 = 0;     // SQ8 mirror
+        std::size_t pq = 0;      // PQ codes + codebook
+        std::size_t links = 0;   // mutable vector-of-vectors adjacency
+        std::size_t csr = 0;     // sealed CSR adjacency
+        std::size_t nodes = 0;   // node headers
         [[nodiscard]] std::size_t total() const noexcept {
             return vectors + sq8 + pq + links + csr + nodes;
         }
@@ -213,10 +213,12 @@ public:
     [[nodiscard]] MemoryUse memory_use() const noexcept {
         MemoryUse u;
         u.vectors = store_.capacity() * sizeof(float);
-        u.sq8     = q8_.capacity() * sizeof(std::int8_t);
-        u.pq      = pq_codes_.capacity();
-        for (const auto& off : csr_off_) u.csr += off.capacity() * sizeof(std::uint32_t);
-        for (const auto& nbr : csr_nbr_) u.csr += nbr.capacity() * sizeof(std::uint32_t);
+        u.sq8 = q8_.capacity() * sizeof(std::int8_t);
+        u.pq = pq_codes_.capacity();
+        for (const auto& off : csr_off_)
+            u.csr += off.capacity() * sizeof(std::uint32_t);
+        for (const auto& nbr : csr_nbr_)
+            u.csr += nbr.capacity() * sizeof(std::uint32_t);
         for (const auto& nd : nodes_) {
             u.nodes += sizeof(Node) + nd.bits.capacity() * sizeof(std::uint64_t);
             for (const auto& layer : nd.links)
@@ -231,7 +233,7 @@ public:
     [[nodiscard]] std::string serialize() const;
     [[nodiscard]] static Result<HnswIndex> deserialize(std::string_view blob);
 
-private:
+  private:
     // Node payload WITHOUT the vector. Vectors live in a flat arena (`store_`)
     // rather than one std::vector<float> per node, because the graph walk is
     // the hot loop and per-node heap blocks cost it twice: an extra pointer
@@ -240,15 +242,15 @@ private:
     // scored back-to-back. One arena makes `vec_at(n)` pure address arithmetic
     // and makes prefetching the next neighbour actually pay.
     struct Node {
-        std::uint32_t              id = 0;
+        std::uint32_t id = 0;
         // True once a later add() replaced this id. The node stays in the graph
         // as a waypoint (its edges are still useful for navigation) but is
         // never returned. Distinct from `deleted_`, which tombstones an ID:
         // here the id is very much alive, it is this particular NODE that is
         // stale, so an id-keyed set cannot express it.
-        bool                       superseded = false;
-        std::vector<std::uint64_t> bits;    // sign code (binary mode)
-        std::vector<std::vector<std::uint32_t>> links;  // links[layer]
+        bool superseded = false;
+        std::vector<std::uint64_t> bits;               // sign code (binary mode)
+        std::vector<std::vector<std::uint32_t>> links; // links[layer]
     };
 
     // One spinlock per node, guarding that node's `links` during a concurrent
@@ -256,19 +258,22 @@ private:
     // dozen nanoseconds — sorting at most 2M neighbour ids — and contention is
     // rare: two threads must pick the same neighbour in the same layer.
     // Held in a separate array so Node stays trivially movable/serializable.
-    struct alignas(64) NodeLock {                 // cache-line padded: no false sharing
+    struct alignas(64) NodeLock { // cache-line padded: no false sharing
         std::atomic_flag flag = ATOMIC_FLAG_INIT;
-        void lock()   noexcept { while (flag.test_and_set(std::memory_order_acquire)) ; }
+        void lock() noexcept {
+            while (flag.test_and_set(std::memory_order_acquire))
+                ;
+        }
         void unlock() noexcept { flag.clear(std::memory_order_release); }
     };
 
-    HnswConfig    cfg_{};
-    std::size_t   dim_       = 0;
-    int           max_layer_ = -1;
-    std::uint32_t entry_     = 0;
+    HnswConfig cfg_{};
+    std::size_t dim_ = 0;
+    int max_layer_ = -1;
+    std::uint32_t entry_ = 0;
     // `mutable` because seal()/unseal() move the adjacency between the CSR and
     // per-node representations, which is a physical layout change only.
-    mutable std::vector<Node> nodes_;          // index == internal node ordinal
+    mutable std::vector<Node> nodes_; // index == internal node ordinal
     // Flat vector arena: node k's unit-normalized vector is
     // store_[k*dim_ .. k*dim_+dim_). Sized in lockstep with nodes_.
     //
@@ -308,12 +313,12 @@ private:
     // Trained and encoded by seal(); dropped by unseal() only when the floats
     // survive — if they were dropped, the codes ARE the index and rebuilding
     // them is impossible.
-    mutable ProductQuantizer         pq_;
+    mutable ProductQuantizer pq_;
     mutable std::vector<std::uint8_t> pq_codes_;
-    mutable std::size_t              pq_m_ = 0;
+    mutable std::size_t pq_m_ = 0;
     // True once the float arena has been released; store_ is then empty and
     // exact rescoring is no longer available.
-    mutable bool                     floats_dropped_ = false;
+    mutable bool floats_dropped_ = false;
 
     // ── Sealed adjacency (CSR) ────────────────────────────────────
     // `nodes_[n].links[L]` is a vector-of-vectors: reaching one neighbour list
@@ -340,7 +345,7 @@ private:
     mutable std::vector<std::vector<std::uint32_t>> csr_nbr_;
     mutable bool sealed_ = false;
 
-    std::unordered_set<std::uint32_t> deleted_;  // tombstoned ids (soft-delete)
+    std::unordered_set<std::uint32_t> deleted_; // tombstoned ids (soft-delete)
 
     // id -> ordinal of the LIVE node for that id, used only to supersede the
     // old node on a re-add.
@@ -362,7 +367,8 @@ private:
     void seal() const;
     // Drop the CSR mirror because the graph is about to change.
     void unseal() noexcept {
-        if (!sealed_) return;
+        if (!sealed_)
+            return;
         // The mutable adjacency was released at seal time, so restore it from
         // the CSR before anything tries to mutate it.
         unpack_links();
@@ -402,7 +408,7 @@ private:
         return pq_codes_.data() + n * pq_m_;
     }
 
-    [[nodiscard]] int  random_level();
+    [[nodiscard]] int random_level();
     // `q8` is the SQ8-quantized query, or empty to score on exact floats.
     // `adc` is the PQ lookup table for the query, or empty for no PQ.
     [[nodiscard]] float sim(std::size_t node_a, std::span<const float> q,
@@ -413,16 +419,19 @@ private:
     // Neighbours of `n` in layer `L`, or {} if it does not reach that layer.
     // Reads the sealed CSR when available and falls back to the mutable
     // vector-of-vectors during a build.
-    [[nodiscard]] std::span<const std::uint32_t>
-    neighbours(std::uint32_t n, std::size_t L) const noexcept {
+    [[nodiscard]] std::span<const std::uint32_t> neighbours(std::uint32_t n,
+                                                            std::size_t L) const noexcept {
         if (sealed_) {
-            if (L >= csr_off_.size()) return {};
+            if (L >= csr_off_.size())
+                return {};
             const auto& off = csr_off_[L];
-            if (n + 1 >= off.size()) return {};
+            if (n + 1 >= off.size())
+                return {};
             return {csr_nbr_[L].data() + off[n], off[n + 1] - off[n]};
         }
         const auto& lk = nodes_[n].links;
-        if (L >= lk.size()) return {};
+        if (L >= lk.size())
+            return {};
         return {lk[L].data(), lk[L].size()};
     }
 
@@ -430,19 +439,18 @@ private:
     // returning a fresh vector: at ef_search=64 the return allocation was a
     // per-query malloc/free pair on the hottest path in the library.
     void search_layer_into(std::span<const float> q, std::span<const std::uint64_t> q_bits,
-                           std::span<const std::int8_t> q8,
-                           std::span<const float> adc,
+                           std::span<const std::int8_t> q8, std::span<const float> adc,
                            std::uint32_t entry, int layer, std::size_t ef,
                            std::vector<std::uint32_t>& out) const;
-    [[nodiscard]] std::vector<std::uint32_t>
-    search_layer(std::span<const float> q, std::span<const std::uint64_t> q_bits,
-                 std::uint32_t entry, int layer, std::size_t ef) const;
+    [[nodiscard]] std::vector<std::uint32_t> search_layer(std::span<const float> q,
+                                                          std::span<const std::uint64_t> q_bits,
+                                                          std::uint32_t entry, int layer,
+                                                          std::size_t ef) const;
     void connect(std::uint32_t node, int layer, std::vector<std::uint32_t> neighbours);
 
     // Score `cands` against node `n` and sort best-first into `out`, computing
     // each similarity exactly once. Shared by connect() and connect_locked().
-    void score_and_sort(std::uint32_t node,
-                        const std::vector<std::uint32_t>& cands,
+    void score_and_sort(std::uint32_t node, const std::vector<std::uint32_t>& cands,
                         std::vector<std::pair<float, std::uint32_t>>& out) const;
 
     // Similarity between two indexed nodes, on the same scale score_and_sort
@@ -451,8 +459,7 @@ private:
 
     // connect() variant used during a concurrent build: takes the per-node
     // spinlocks before mutating adjacency.
-    void connect_locked(std::uint32_t node, int layer,
-                        std::vector<std::uint32_t> neighbours,
+    void connect_locked(std::uint32_t node, int layer, std::vector<std::uint32_t> neighbours,
                         std::vector<NodeLock>& locks);
 
     // ── Search scratch ───────────────────────────────────────────────────────
@@ -463,27 +470,29 @@ private:
     // epoch instead of rewriting n bytes) and vector-backed heaps that keep
     // their capacity across calls.
     struct Scratch {
-        std::vector<std::uint32_t> visit_epoch;   // per-node last-seen epoch
-        std::uint32_t             epoch = 0;
-        std::vector<std::pair<float, std::uint32_t>> cand;    // max-heap by sim
-        std::vector<std::pair<float, std::uint32_t>> result;  // min-heap by sim
-        std::vector<std::uint32_t> hop;                       // search_layer output reuse
-        std::vector<float>         query;                     // normalized query vector
-        std::vector<std::int8_t>   query_q8;                  // SQ8 of the same
-        std::vector<float>         adc;                       // PQ lookup table for the same
-        std::vector<float>         recon;                     // PQ reconstruction buffer
+        std::vector<std::uint32_t> visit_epoch; // per-node last-seen epoch
+        std::uint32_t epoch = 0;
+        std::vector<std::pair<float, std::uint32_t>> cand;   // max-heap by sim
+        std::vector<std::pair<float, std::uint32_t>> result; // min-heap by sim
+        std::vector<std::uint32_t> hop;                      // search_layer output reuse
+        std::vector<float> query;                            // normalized query vector
+        std::vector<std::int8_t> query_q8;                   // SQ8 of the same
+        std::vector<float> adc;                              // PQ lookup table for the same
+        std::vector<float> recon;                            // PQ reconstruction buffer
 
         void reset(std::size_t n) {
-            if (visit_epoch.size() < n) visit_epoch.assign(n, 0);
-            if (++epoch == 0) {                      // wrapped: clear for real
+            if (visit_epoch.size() < n)
+                visit_epoch.assign(n, 0);
+            if (++epoch == 0) { // wrapped: clear for real
                 std::fill(visit_epoch.begin(), visit_epoch.end(), 0);
                 epoch = 1;
             }
             cand.clear();
             result.clear();
         }
-        [[nodiscard]] bool mark(std::uint32_t id) {  // true if newly visited
-            if (visit_epoch[id] == epoch) return false;
+        [[nodiscard]] bool mark(std::uint32_t id) { // true if newly visited
+            if (visit_epoch[id] == epoch)
+                return false;
             visit_epoch[id] = epoch;
             return true;
         }

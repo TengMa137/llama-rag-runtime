@@ -78,7 +78,7 @@ llama-rag-server (C++17)
   `-- lrs_core (C++17)
        |-- lrs_httplib (C++17)
        `-- lrs_bridge (implementation C++20, public header is C)
-            `-- rag::rag (C++20; ragcpp::ragcpp compatibility alias)
+            `-- rag::core (C++20)
 
 llama-server (llama.cpp C++17 baseline)
 lrs-tests (native Catch2 test executable)
@@ -87,9 +87,12 @@ lrs-spec-check (native traceability executable)
 
 The bridge exposes opaque `lrs_index*` handles, plain option structures, integer status values, and explicit string destructors. No rag.cpp header or C++ ABI type crosses into coordinator headers. rag.cpp also provides a versioned opaque C ABI whose extensible options begin with `abi_version` and `struct_size`.
 
-The explicit owned target omits rag.cpp's llama integration, RCP server, Metal backend, examples, CLI, and research modules from the product build. The coordinator talks to an embedding service over HTTP instead of loading an embedding GGUF inside rag.cpp.
+The owned rag.cpp core contains no llama integration, agent protocol, Metal backend, examples, CLI, or research modules. The coordinator talks to a loopback embedding service instead of loading a model inside rag.cpp.
 
-Catch2 v3.8.1 is fetched at configure time when `LRS_BUILD_TESTS=ON`. A clean configure therefore needs network access unless Catch2 is already populated in the build cache.
+Catch2 3 is a system build dependency for the parent desktop suite when
+`LRS_BUILD_TESTS=ON`; CMake never downloads it. On macOS, install it with
+`brew install catch2` before configuring the development preset. The owned
+rag.cpp behavior tests themselves remain framework-free.
 
 ## 4. Configuration and process lifecycle
 
@@ -116,7 +119,7 @@ Current lifecycle limitations:
 
 ## 5. Index and persistence model
 
-The configured `index.path` is the active rag.cpp `.ragdb`. Its sibling `<path>.manifest.json` records the schema, rag.cpp version, chunking fingerprint, chunk settings, and embedding dimension. An existing database is rejected when the manifest is missing or incompatible.
+The configured `index.path` is the active `.ragdb`. Its sibling `<path>.manifest.json` records the schema, retrieval-core version, chunking fingerprint, chunk settings, and embedding dimension. An existing database is rejected when the manifest is missing or incompatible.
 
 Current chunk settings in `src/bridge.cpp` are:
 
@@ -204,7 +207,7 @@ Current query limitations:
 
 Applications that need their own agent loop can call `/v1/rag/search` and then call an OpenAI-compatible generation backend themselves. The private ports are intentionally loopback-only.
 
-Agentic RAG is not implemented by the coordinator. The runtime does not call rag.cpp's HyDE, CRAG, Self-RAG, or RAPTOR components and does not expose agent-run endpoints. The current path retrieves once and makes one generation request; the bounded agent behavior in the product specification is a future phase.
+Agentic RAG is not implemented by the coordinator. Those research systems are not part of rag.cpp, and the runtime does not expose agent-run endpoints. The current path retrieves once and makes one generation request; bounded agent behavior belongs in a future parent-runtime phase.
 
 ## 8. Concurrency and ownership
 
@@ -260,7 +263,7 @@ The normative integration handoff for the adjacent application is
 [`MOBILE_RAG_CONTRACT.md`](MOBILE_RAG_CONTRACT.md). Start there when wiring
 `../mobileAgent`; this section explains the implementation architecture.
 
-Android now has an initial `arm64-v8a` build target. The artifact is the in-process `libragcpp_mobile.so`, not an Android command-line server. Flutter calls it through Dart FFI and keeps the `.ragdb` in app-private storage.
+Android now has an initial `arm64-v8a` build target. The artifact is the in-process `librag_mobile.so`, not an Android command-line server. Flutter calls it through Dart FFI and keeps the `.ragdb` in app-private storage.
 
 The intended mobile split is:
 
@@ -268,7 +271,7 @@ The intended mobile split is:
 Flutter application
   |-- existing Flutter LLM engine --> answer generation
   |-- LiteRT/Flutter embedding model --> document and query vectors
-  `-- libragcpp_mobile.so --> chunk/index/search/persist
+  `-- librag_mobile.so --> chunk/index/search/persist
 ```
 
 llama.cpp is unnecessary in that topology when the Flutter stack supplies both generation and embedding inference. If it only supplies generation, a separate embedding model/runtime is still required because every dense query needs an embedding.

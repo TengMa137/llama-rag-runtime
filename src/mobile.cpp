@@ -85,13 +85,12 @@ rag::index::CorpusConfig corpus_config() {
     config.chunk.max_chars = 384;
     config.chunk.overlap_lines = 4;
     config.chunk.heading_context = false;
-    config.chunk.policy.model_identity = "caller-supplied";
+    config.chunk.policy.model_identity = "default";
     config.chunk.policy.tokenizer_identity = "conservative-utf8-bytes-v1";
     config.chunk.policy.target_tokens = 320;
     config.chunk.policy.max_tokens = 384;
     config.chunk.policy.overlap_tokens = 32;
     config.chunk.policy.counting_mode = rag::text::TokenCountingMode::conservative_utf8_bytes;
-    config.chunking = rag::index::CorpusConfig::Chunking::fixed;
     return config;
 }
 
@@ -221,6 +220,10 @@ nlohmann::json search_results(const std::vector<rag::SearchResult>& results) {
 } // namespace
 
 extern "C" int lrs_mobile_open(const char* database_path, lrs_mobile_index** out, char** error) {
+    if (out != nullptr)
+        *out = nullptr;
+    if (error != nullptr)
+        *error = nullptr;
     if (database_path == nullptr || database_path[0] == '\0' || out == nullptr) {
         return fail(error, "database_path and output handle are required");
     }
@@ -232,12 +235,18 @@ extern "C" int lrs_mobile_open(const char* database_path, lrs_mobile_index** out
         return 0;
     } catch (const std::exception& exception) {
         return fail(error, exception.what());
+    } catch (...) {
+        return fail(error, "unknown C++ exception");
     }
 }
 
 extern "C" int lrs_mobile_prepare_document_json(const lrs_mobile_index* index,
                                                 const char* document_id, const char* content,
                                                 char** json, char** error) {
+    if (json != nullptr)
+        *json = nullptr;
+    if (error != nullptr)
+        *error = nullptr;
     if (index == nullptr || document_id == nullptr || content == nullptr || json == nullptr) {
         return fail(error, "index, document_id, content, and output are required");
     }
@@ -253,15 +262,23 @@ extern "C" int lrs_mobile_prepare_document_json(const lrs_mobile_index* index,
                                       {"end_line", chunk.end_line}});
         }
         *json = copy_string(body.dump());
+        if (*json == nullptr)
+            return fail(error, "allocation failed");
         return 0;
     } catch (const std::exception& exception) {
         return fail(error, exception.what());
+    } catch (...) {
+        return fail(error, "unknown C++ exception");
     }
 }
 
 extern "C" int lrs_mobile_upsert_lexical(lrs_mobile_index* index, const char* document_id,
                                          const char* title, const char* content, int* unchanged,
                                          char** error) {
+    if (unchanged != nullptr)
+        *unchanged = 0;
+    if (error != nullptr)
+        *error = nullptr;
     if (index == nullptr || document_id == nullptr || title == nullptr || content == nullptr ||
         unchanged == nullptr) {
         return fail(error, "invalid lexical upsert arguments");
@@ -294,6 +311,8 @@ extern "C" int lrs_mobile_upsert_lexical(lrs_mobile_index* index, const char* do
         return 0;
     } catch (const std::exception& exception) {
         return fail(error, exception.what());
+    } catch (...) {
+        return fail(error, "unknown C++ exception");
     }
 }
 
@@ -302,9 +321,13 @@ extern "C" int lrs_mobile_upsert_vectors(lrs_mobile_index* index, const char* do
                                          const float* embeddings, std::size_t embedding_count,
                                          std::size_t embedding_dimension, int* unchanged,
                                          char** error) {
+    if (unchanged != nullptr)
+        *unchanged = 0;
+    if (error != nullptr)
+        *error = nullptr;
     if (index == nullptr || document_id == nullptr || title == nullptr || content == nullptr ||
         embeddings == nullptr || embedding_count == 0 || embedding_dimension == 0 ||
-        unchanged == nullptr) {
+        embedding_count > SIZE_MAX / embedding_dimension || unchanged == nullptr) {
         return fail(error, "invalid vector upsert arguments");
     }
     try {
@@ -346,6 +369,8 @@ extern "C" int lrs_mobile_upsert_vectors(lrs_mobile_index* index, const char* do
         return 0;
     } catch (const std::exception& exception) {
         return fail(error, exception.what());
+    } catch (...) {
+        return fail(error, "unknown C++ exception");
     }
 }
 
@@ -353,6 +378,10 @@ extern "C" int lrs_mobile_search_json(lrs_mobile_index* index, const char* query
                                       const float* query_embedding, std::size_t embedding_dimension,
                                       const char* mode, std::size_t top_k, char** json,
                                       char** error) {
+    if (json != nullptr)
+        *json = nullptr;
+    if (error != nullptr)
+        *error = nullptr;
     if (index == nullptr || query == nullptr || mode == nullptr || json == nullptr || top_k == 0 ||
         top_k > 100) {
         return fail(error, "invalid mobile search arguments");
@@ -399,9 +428,13 @@ extern "C" int lrs_mobile_search_json(lrs_mobile_index* index, const char* query
             }
         }
         *json = copy_string(search_results(results).dump());
+        if (*json == nullptr)
+            return fail(error, "allocation failed");
         return 0;
     } catch (const std::exception& exception) {
         return fail(error, exception.what());
+    } catch (...) {
+        return fail(error, "unknown C++ exception");
     }
 }
 

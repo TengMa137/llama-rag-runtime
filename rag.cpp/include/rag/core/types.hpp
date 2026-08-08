@@ -17,7 +17,7 @@
 //      (struct) for records — the algebraic data types of the domain.
 //
 //   4. Result<T> = value | Error: total functions. Fallible operations return
-//      a value OR a typed error and do not require a C++23 standard library.
+//      a value OR a typed error using the core's C++20 baseline.
 
 #include <compare>
 #include <concepts>
@@ -143,7 +143,7 @@ struct Unexpected {
 
 // A deliberately small C++20 expected-like value.  The owned runtime only
 // needs observation and propagation; keeping that surface compact avoids
-// exposing a C++23 library type to Android toolchains.
+// exposing a newer-standard library type to Android toolchains.
 template <class T> class Result {
   public:
     Result(const T& value) : state_(value) {}

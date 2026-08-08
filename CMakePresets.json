@@ -10,8 +10,7 @@
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
         "LRS_BUILD_LLAMA_SERVER": "ON",
-        "LRS_BUILD_TESTS": "ON",
-        "RAGCPP_WITH_LLAMA": "OFF"
+        "LRS_BUILD_TESTS": "ON"
       }
     },
     {
@@ -29,11 +28,7 @@
         "LRS_BUILD_MOBILE": "ON",
         "LRS_BUILD_MOBILE_SMOKE": "ON",
         "LRS_BUILD_SPEC_CHECK": "OFF",
-        "LRS_BUILD_TESTS": "OFF",
-        "RAGCPP_WITH_LLAMA": "OFF",
-        "RAGCPP_WITH_METAL": "OFF",
-        "RAGCPP_WITH_ONNX": "OFF",
-        "RAGCPP_WITH_RCP": "OFF"
+        "LRS_BUILD_TESTS": "OFF"
       }
     }
   ],

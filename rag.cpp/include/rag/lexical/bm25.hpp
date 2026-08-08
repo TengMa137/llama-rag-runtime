@@ -22,20 +22,19 @@ namespace rag::lexical {
 
 struct Bm25Params {
     float k1 = 1.2f;
-    float b  = 0.75f;
+    float b = 0.75f;
 };
 
 // One posting: which document, and the term frequency there.
 struct Posting {
-    std::uint32_t doc;   // dense internal doc ordinal (== ChunkId in the corpus)
+    std::uint32_t doc; // dense internal doc ordinal (== ChunkId in the corpus)
     std::uint32_t tf;
 };
 
 class Bm25Index {
-public:
+  public:
     Bm25Index() = default;
-    explicit Bm25Index(Bm25Params p, text::TokenizeOptions topts = {})
-        : params_(p), tok_(topts) {}
+    explicit Bm25Index(Bm25Params p, text::TokenizeOptions topts = {}) : params_(p), tok_(topts) {}
 
     // Add a document identified by ordinal `id` (must be unique, monotonically
     // assigned by the caller). Returns the number of indexed terms.
@@ -70,11 +69,10 @@ public:
     // already knows which documents contain which terms — asking it is both
     // faster and, since it is the same analysis chain that produced the
     // postings, strictly more consistent than re-deriving the answer.
-    void term_coverage(const std::vector<std::string>& q_terms,
-                       std::span<const std::uint32_t> docs,
+    void term_coverage(const std::vector<std::string>& q_terms, std::span<const std::uint32_t> docs,
                        std::vector<std::uint32_t>& out) const;
 
-    [[nodiscard]] std::size_t size()      const noexcept { return doc_len_.size(); }
+    [[nodiscard]] std::size_t size() const noexcept { return doc_len_.size(); }
     [[nodiscard]] std::size_t vocab_size() const noexcept { return postings_.size(); }
     [[nodiscard]] const text::Tokenizer& tokenizer() const noexcept { return tok_; }
 
@@ -82,7 +80,7 @@ public:
     [[nodiscard]] std::string serialize() const;
     [[nodiscard]] static Result<Bm25Index> deserialize(std::string_view blob);
 
-private:
+  private:
     Bm25Params params_{};
     text::Tokenizer tok_{};
 
@@ -96,7 +94,7 @@ private:
     // once per POSTING — the inner loop of every lexical query. dense_len_ is
     // empty until finalize(); scoring falls back to the map if so.
     std::vector<std::uint32_t> dense_len_;
-    std::uint32_t              max_doc_ = 0;
+    std::uint32_t max_doc_ = 0;
 
     // ── Precomputed posting weights ─────────────────────────────────
     // A posting's BM25 contribution is
@@ -115,9 +113,9 @@ private:
     // term -> [begin,end) range into pw_, aligned with that term's postings.
     std::unordered_map<std::string, std::pair<std::uint32_t, std::uint32_t>> pw_span_;
 
-    double  total_len_ = 0.0;
-    float   avgdl_     = 0.0f;
-    bool    finalized_ = false;
+    double total_len_ = 0.0;
+    float avgdl_ = 0.0f;
+    bool finalized_ = false;
 
     [[nodiscard]] float idf(std::size_t n_t) const;
 };

@@ -99,7 +99,6 @@ rag::index::CorpusConfig corpus_config(const lrs_index_options& options) {
         cfg.chunk.policy.overlap_tokens = 32;
         cfg.chunk.policy.counting_mode = rag::text::TokenCountingMode::conservative_utf8_bytes;
     }
-    cfg.chunking = rag::index::CorpusConfig::Chunking::fixed;
     return cfg;
 }
 
@@ -109,10 +108,15 @@ void attach_embedder(rag::Engine& engine, const lrs_index_options& options) {
             rag::dense::AnyEmbedder(rag::dense::HashEmbedder(options.embedding_dimension)));
         return;
     }
-    rag::dense::OpenAIConfig cfg = rag::dense::OpenAIConfig::local(
-        options.embedding_host, options.embedding_port,
-        options.embedding_model ? options.embedding_model : "default", options.embedding_dimension);
-    engine.with_embedder(rag::dense::AnyEmbedder(rag::dense::OpenAIEmbedder(std::move(cfg))));
+    rag::dense::LocalHttpEmbedderConfig cfg;
+    cfg.host = options.embedding_host;
+    cfg.port = options.embedding_port;
+    cfg.model = options.embedding_model ? options.embedding_model : "default";
+    cfg.dimension = options.embedding_dimension;
+    auto embedder = rag::dense::LocalHttpEmbedder::create(std::move(cfg));
+    if (!embedder)
+        throw std::runtime_error(embedder.error().message);
+    engine.with_embedder(rag::dense::AnyEmbedder(std::move(*embedder)));
 }
 
 std::unique_ptr<rag::Engine> load_engine(const lrs_index_options& options) {
@@ -137,7 +141,7 @@ std::unique_ptr<rag::Engine> load_engine(const lrs_index_options& options) {
 void write_manifest(const lrs_index_options& options) {
     const auto cfg = corpus_config(options);
     nlohmann::json manifest = {{"schema", 1},
-                               {"rag_cpp", "owned-v0.1.1"},
+                               {"retrieval_core", "v0.2.0"},
                                {"source_commit", "cfe46cee87fccb9ca5dee68d416229489285fdea"},
                                {"chunking", rag::text::chunking_fingerprint(cfg.chunk)},
                                {"max_lines", 40},
@@ -170,12 +174,24 @@ void validate_manifest(const lrs_index_options& options) {
     nlohmann::json manifest;
     input >> manifest;
     const auto cfg = corpus_config(options);
+    // These two spellings are read-only compatibility for already published
+    // manifests. New manifests use retrieval_core exclusively.
     const bool legacy = manifest.value("rag_cpp", "") == "v0.1.0" &&
                         manifest.value("chunking", "") == "ragcpp-fixed-v0.1.0";
-    const bool current =
-        manifest.value("rag_cpp", "") == "owned-v0.1.1" &&
-        manifest.value("chunking", "") == rag::text::chunking_fingerprint(cfg.chunk);
-    if (manifest.value("schema", 0) != 1 || (!legacy && !current) ||
+    const std::string stored_fingerprint = manifest.value("chunking", "");
+    const bool prior_owned = manifest.value("rag_cpp", "") == "owned-v0.1.1" &&
+                             stored_fingerprint.rfind("rag.cpp-hierarchical-v1|", 0) == 0;
+    const bool current = manifest.value("retrieval_core", "") == "v0.2.0" &&
+                         stored_fingerprint == rag::text::chunking_fingerprint(cfg.chunk);
+    const bool policy_compatible =
+        legacy ||
+        (manifest.value("target_tokens", std::size_t{}) == cfg.chunk.policy.target_tokens &&
+         manifest.value("max_tokens", std::size_t{}) == cfg.chunk.policy.max_tokens &&
+         manifest.value("overlap_tokens", std::size_t{}) == cfg.chunk.policy.overlap_tokens &&
+         manifest.value("tokenizer", std::string{}) == cfg.chunk.policy.tokenizer_identity &&
+         manifest.value("model", std::string{}) == cfg.chunk.policy.model_identity);
+    if (manifest.value("schema", 0) != 1 || (!legacy && !prior_owned && !current) ||
+        !policy_compatible ||
         manifest.value("embedding_dimension", 0U) != options.embedding_dimension ||
         manifest.value("max_lines", 0U) != 40U || manifest.value("max_chars", 0U) != 384U ||
         manifest.value("overlap_lines", 0U) != 4U || manifest.value("heading_context", true))
@@ -208,6 +224,10 @@ int publish(std::unique_ptr<rag::Engine> next, const lrs_index_options& options,
 } // namespace
 
 extern "C" int lrs_index_open(const lrs_index_options* options, lrs_index** out, char** error) {
+    if (out)
+        *out = nullptr;
+    if (error)
+        *error = nullptr;
     if (!options || !out || !options->database_path || !options->embedding_host)
         return fail(error, "invalid index options");
     try {
@@ -219,6 +239,8 @@ extern "C" int lrs_index_open(const lrs_index_options* options, lrs_index** out,
         return 0;
     } catch (const std::exception& e) {
         return fail(error, e.what());
+    } catch (...) {
+        return fail(error, "unknown C++ exception");
     }
 }
 
@@ -226,6 +248,12 @@ extern "C" int lrs_index_stage_upsert(const lrs_index* current, const lrs_index_
                                       const char* document_id, const char* title,
                                       const char* content, lrs_index** candidate, int* unchanged,
                                       char** error) {
+    if (candidate)
+        *candidate = nullptr;
+    if (unchanged)
+        *unchanged = 0;
+    if (error)
+        *error = nullptr;
     if (!current || !options || !document_id || !title || !content || !candidate || !unchanged)
         return fail(error, "invalid upsert arguments");
     try {
@@ -254,12 +282,20 @@ extern "C" int lrs_index_stage_upsert(const lrs_index* current, const lrs_index_
         return publish(std::move(next), *options, candidate, error);
     } catch (const std::exception& e) {
         return fail(error, e.what());
+    } catch (...) {
+        return fail(error, "unknown C++ exception");
     }
 }
 
 extern "C" int lrs_index_stage_delete(const lrs_index* current, const lrs_index_options* options,
                                       const char* document_id, lrs_index** candidate, int* deleted,
                                       char** error) {
+    if (candidate)
+        *candidate = nullptr;
+    if (deleted)
+        *deleted = 0;
+    if (error)
+        *error = nullptr;
     if (!current || !options || !document_id || !candidate || !deleted)
         return fail(error, "invalid delete arguments");
     try {
@@ -280,11 +316,17 @@ extern "C" int lrs_index_stage_delete(const lrs_index* current, const lrs_index_
         return publish(std::move(next), *options, candidate, error);
     } catch (const std::exception& e) {
         return fail(error, e.what());
+    } catch (...) {
+        return fail(error, "unknown C++ exception");
     }
 }
 
 extern "C" int lrs_index_search_json(const lrs_index* index, const char* query, const char* mode,
                                      size_t top_k, char** json, char** error) {
+    if (json)
+        *json = nullptr;
+    if (error)
+        *error = nullptr;
     if (!index || !query || !mode || !json || top_k == 0 || top_k > 100)
         return fail(error, "invalid search arguments");
     try {
@@ -324,9 +366,13 @@ extern "C" int lrs_index_search_json(const lrs_index* index, const char* query, 
                                        {"text", hit.text}});
         }
         *json = copy_string(body.dump());
+        if (*json == nullptr)
+            return fail(error, "allocation failed");
         return 0;
     } catch (const std::exception& e) {
         return fail(error, e.what());
+    } catch (...) {
+        return fail(error, "unknown C++ exception");
     }
 }
 

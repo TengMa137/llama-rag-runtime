@@ -1,25 +1,27 @@
-# Runtime capability matrix
+# Supported contract
 
-| Capability | Runtime status | Inclusion requirement |
+| Capability | Status | Public entry point |
 |---|---|---|
-| Deterministic structural/token-aware chunking | Shipped | Compatibility and hard-limit tests |
-| BM25, exact cosine, HNSW, filtering, tombstones | Shipped | Retrieval and persistence tests |
-| RRF, RSF, convex fusion | Shipped | Deterministic ranking tests |
-| Efficiency, balanced, quality profiles | Shipped policy bundles | qrels quality/latency baseline |
-| MMR and adjacent-parent stitching | Quality profile | Coverage evaluation |
-| Injected HTTP or caller-computed embeddings | Shipped | Dimension/norm/order validation |
-| GraphRAG, RAPTOR, HyDE, CRAG, Self-RAG | Roadmap | Corpus-specific quality gain and bounded cost |
-| Semantic/contextual chunking | Roadmap for product target | Re-index migration and retrieval evaluation |
-| SPLADE/learned sparse, ColBERT, model rerankers | Roadmap | Model lifecycle, size, latency, and qrels gain |
-| Plugins, RCP, CLI, ONNX, GPU, in-process llama.cpp | Not in runtime target | Concrete product requirement and platform budget |
+| Documents, metadata, chunks, line ranges, stable IDs | Supported | core types, `Corpus` |
+| Deterministic token-budgeted UTF-8 structural chunking | Supported | `text::ChunkOptions`, fingerprint |
+| BM25 and metadata-filtered lexical search | Supported | `Corpus` |
+| Exact cosine and HNSW dense search | Supported | `Corpus`, HNSW config |
+| Lexical, dense, hybrid retrieval | Supported | `Corpus`, `Engine`, `Pipeline` |
+| RRF fusion | Supported | fusion and pipeline config |
+| MMR and adjacent-chunk stitching | Supported | pipeline/profile config |
+| Efficiency, balanced, quality profiles | Supported | retrieval options/diagnostics |
+| Caller-supplied embeddings | Supported | `AnyEmbedder` |
+| Deterministic hash embeddings | Supported | `HashEmbedder` |
+| Bounded loopback HTTP embeddings | Supported | `LocalHttpEmbedder` |
+| `.ragdb` v1.0–v1.2, tombstones, atomic publication | Supported | `Engine`, `Container` |
+| WAL recovery and checkpointing | Supported | `Corpus`, `Wal` |
+| C++20 target and stable opaque C ABI | Supported | `rag::core`, `rag/c/rag.h` |
+| SIMD CPU acceleration | Supported | automatic |
+| GPU execution | Not supported | CPU-only device seam |
 
-Research sources may remain in the owned tree for provenance and later study,
-but the explicit CMake source list is the shipped boundary.
-
-## `.ragdb` v2 roadmap
-
-Version 2 is intentionally not implemented. It requires a concrete incompatible
-need and a migration tool. Candidate work includes wider stable IDs,
-transactional generation directories, an explicit WAL/checkpoint policy,
-richer byte/source offsets, and resumable migrations. Version 1 remains the
-portable single-file format; additive metadata belongs in its `META` JSON.
+Agents, prompts, chat, generation, user-facing servers, model lifecycle,
+general remote providers, dynamic extensions, content loaders, and research
+retrieval systems are parent-runtime concerns or intentionally out of scope.
+They are not a roadmap for this library. New features enter this contract only
+when they are fundamental retrieval primitives with product-level tests and a
+format/compatibility analysis.

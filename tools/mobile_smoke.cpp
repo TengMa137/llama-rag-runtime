@@ -16,7 +16,7 @@ int main(int argc, char** argv) {
     const float document_vector[] = {1.0F, 0.0F};
     int unchanged = 0;
     if (lrs_mobile_upsert_vectors(index, "device/smoke", "Device smoke",
-                                  "PLQ110 native rag-cpp vector search", document_vector, 1, 2,
+                                  "PLQ110 native retrieval-core vector search", document_vector, 1, 2,
                                   &unchanged, &error) != 0) {
         std::cerr << (error != nullptr ? error : "upsert failed") << '\n';
         lrs_mobile_string_destroy(error);

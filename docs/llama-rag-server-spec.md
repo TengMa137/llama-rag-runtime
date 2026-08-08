@@ -110,13 +110,13 @@ Current llama.cpp server architecture provides HTTP routing, request queues, res
 
 llama.cpp and ggml currently use C++17 as their baseline. The project must not globally force the entire superbuild to C++20. <!-- [LRS-SPEC-004] -->
 
-### 5.2 rag.cpp
+### 5.2 Retrieval core
 
-The owned baseline is derived from rag-cpp v0.1.0 commit
-`cfe46cee87fccb9ca5dee68d416229489285fdea`. rag.cpp requires C++20 and CMake
-3.24 or newer. It exposes `rag::rag` plus the transitional `ragcpp::ragcpp`
-alias and provides hybrid BM25 plus dense retrieval, HNSW, metadata support,
-deletion, and versioned `.ragdb` persistence. <!-- [LRS-SPEC-005] -->
+The repository-owned retrieval core requires C++20 and CMake 3.24 or newer.
+It exposes the `rag::core` CMake target and provides hybrid BM25 plus dense
+retrieval, HNSW, metadata support, deletion, and versioned `.ragdb`
+persistence. Derivation and licensing history are maintained only in
+`rag.cpp/PROVENANCE.md`. <!-- [LRS-SPEC-005] -->
 
 Because rag.cpp is a young dependency, the project must: <!-- [LRS-SPEC-006] -->
 
@@ -352,7 +352,7 @@ Where upstream lacks an extension seam, prefer a small generic hook that could p
 - llama.cpp target code remains C++17.
 - rag.cpp requires C++20.
 - rag.cpp publicly uses C++20 features such as concepts and the owned `Result<T>` value.
-- Linking `rag::rag` directly to a llama.cpp server target propagates the `cxx_std_20` compile feature.
+- Linking `rag::core` directly to a llama.cpp server target propagates the `cxx_std_20` compile feature.
 
 ### 8.2 Required approach
 
@@ -363,7 +363,7 @@ flowchart LR
     Server[llama-rag-server C++17]
     API[rag_bridge.h C-compatible]
     Impl[rag_bridge.cpp C++20]
-    RAG[rag::rag C++20]
+    RAG[rag::core C++20]
 
     Server --> API
     API --> Impl
@@ -525,7 +525,7 @@ add_library(llama_rag_bridge STATIC
     src/rag/rag_bridge.cpp
 )
 target_compile_features(llama_rag_bridge PRIVATE cxx_std_20)
-target_link_libraries(llama_rag_bridge PRIVATE rag::rag)
+target_link_libraries(llama_rag_bridge PRIVATE rag::core)
 target_include_directories(llama_rag_bridge PUBLIC src/rag)
 
 # The public coordinator remains C++17-facing.
@@ -546,15 +546,11 @@ target_link_libraries(llama-rag-server PRIVATE llama_rag_bridge)
 
 The coordinator may invoke the built `llama-server` executable as a child process. It does not need to link directly to private llama-server implementation targets for the first prototype. Direct linkage should be introduced only when it offers a clear maintenance or performance advantage on the pinned upstream revision. <!-- [LRS-SPEC-020] -->
 
-### 9.3 rag.cpp llama backend policy
+### 9.3 rag.cpp embedding boundary
 
-Build with:
-
-```text
-RAGCPP_WITH_LLAMA=OFF
-```
-
-The project must not instantiate rag.cpp's in-process GGUF embedder in v0.1. Instead, it will provide a project-owned embedder adapter that invokes the embedding model through llama-server's runtime. <!-- [LRS-SPEC-021] -->
+The owned rag.cpp core has no in-process model backend. The coordinator uses
+the loopback-only HTTP embedder to invoke the embedding model through
+llama-server's runtime. <!-- [LRS-SPEC-021] -->
 
 This avoids:
 
@@ -852,9 +848,8 @@ llama-rag-server/
   "schema_version": 1,
   "created_at": "2026-08-04T09:00:00Z",
   "updated_at": "2026-08-04T09:00:00Z",
-  "rag_cpp": {
-    "version": "0.1.0",
-    "commit": "cfe46ce"
+  "retrieval_core": {
+    "version": "0.2.0"
   },
   "llama_cpp": {
     "commit": "<PINNED_COMMIT>"
@@ -2196,8 +2191,8 @@ Exit criteria:
 
 ### 26.3 duplicate embedding model
 
-**Risk:** rag.cpp's GGUF embedder creates another llama model context.
-**Mitigation:** disable `RAGCPP_WITH_LLAMA` and provide precomputed embeddings through the project adapter.
+**Risk:** a second in-process embedding backend would create another model context.
+**Mitigation:** keep model lifecycle in the parent runtime and use rag.cpp's loopback HTTP or caller-supplied embedding boundary.
 
 ### 26.4 router-mode instability
 
@@ -2320,7 +2315,7 @@ For the first implementation, use these defaults:
 - one generation process with `--parallel 1` until concurrency is measured;
 - llama.cpp remains on its upstream C++ baseline;
 - rag.cpp stays behind a C++20 private bridge with a C-compatible boundary;
-- `RAGCPP_WITH_LLAMA=OFF`;
+- rag.cpp model lifecycle remains disabled by design;
 - hybrid BM25 plus HNSW retrieval with RRF;
 - deterministic token-window chunking;
 - plain text and Markdown ingestion only;
@@ -2338,8 +2333,6 @@ For the first implementation, use these defaults:
 - llama.cpp server developer architecture: <https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README-dev.md>
 - llama.cpp speculative decoding documentation: <https://github.com/ggml-org/llama.cpp/blob/master/docs/speculative.md>
 - llama.cpp ggml CMake configuration: <https://github.com/ggml-org/llama.cpp/blob/master/ggml/CMakeLists.txt>
-- upstream rag-cpp repository: <https://github.com/1ay1/rag-cpp>
-- upstream rag-cpp v0.1.0 tag: <https://github.com/1ay1/rag-cpp/releases/tag/v0.1.0>
 - owned provenance: `rag.cpp/PROVENANCE.md`
 - owned storage format: `rag.cpp/FORMAT.md`
 - owned architecture: `rag.cpp/ARCHITECTURE.md`

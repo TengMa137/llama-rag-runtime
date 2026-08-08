@@ -4,10 +4,7 @@
 #include "rag/rerank/mmr.hpp"
 
 #include <algorithm>
-#include <array>
 #include <thread>
-#include <unordered_map>
-#include <unordered_set>
 
 namespace rag::pipeline {
 
@@ -72,12 +69,6 @@ Result<Context> HybridRetrieveStage::process(Context ctx) const {
         case HybridRetrieveConfig::Fusion::rrf:
             ctx.candidates = fusion::rrf(sp, cfg_.rrf, cfg_.candidate_k);
             break;
-        case HybridRetrieveConfig::Fusion::rsf:
-            ctx.candidates = fusion::rsf(sp, cfg_.candidate_k);
-            break;
-        case HybridRetrieveConfig::Fusion::convex:
-            ctx.candidates = fusion::convex_combination(sp, cfg_.convex, cfg_.candidate_k);
-            break;
     }
     ctx.trace.push_back("hybrid: " + std::to_string(ctx.candidates.size()) + " candidates");
     return ctx;
@@ -96,68 +87,10 @@ Result<Context> FilterStage::process(Context ctx) const {
     return ctx;
 }
 
-// ── RerankStage ──────────────────────────────────────────────────────────────
-Result<Context> RerankStage::process(Context ctx) const {
-    if (!ctx.corpus || ctx.candidates.empty())
-        return ctx;
-    if (auto r = fn_(ctx.query, ctx.candidates, *ctx.corpus); !r)
-        return unexpected(r.error());
-    std::sort(ctx.candidates.begin(), ctx.candidates.end(),
-              [](const Hit& a, const Hit& b) { return a.score.get() > b.score.get(); });
-    return ctx;
-}
-
 // ── TopKStage ────────────────────────────────────────────────────────────────
 Result<Context> TopKStage::process(Context ctx) const {
     if (ctx.candidates.size() > ctx.k)
         ctx.candidates.resize(ctx.k);
-    return ctx;
-}
-
-// ── PrfExpandStage (RM3-lite pseudo-relevance feedback) ──────────────────────
-Result<Context> PrfExpandStage::process(Context ctx) const {
-    if (!ctx.corpus)
-        return ctx;
-    // Initial probe on the raw query (lexical is enough to seed expansion).
-    auto probe = ctx.corpus->lexical_search(ctx.query, cfg_.probe_k);
-    if (probe.empty())
-        return ctx;
-
-    // Mine term frequencies from the top pseudo-relevant chunks, minus the
-    // terms already in the query (avoid double-weighting).
-    auto q_terms = ctx.corpus->tokenizer().tokenize(ctx.query);
-    std::unordered_set<std::string> qset(q_terms.begin(), q_terms.end());
-    std::unordered_map<std::string, int> freq;
-    std::size_t used = std::min(cfg_.fb_docs, probe.size());
-    for (std::size_t i = 0; i < used; ++i) {
-        const Chunk* ch = ctx.corpus->chunk(probe[i].chunk);
-        if (!ch)
-            continue;
-        for (auto& t : ctx.corpus->tokenizer().tokenize(ch->indexed_text()))
-            if (!qset.contains(t))
-                ++freq[t];
-    }
-    if (freq.empty())
-        return ctx;
-
-    // Pick the top expansion terms by frequency.
-    std::vector<std::pair<std::string, int>> ranked(freq.begin(), freq.end());
-    std::partial_sort(ranked.begin(),
-                      ranked.begin() +
-                          static_cast<std::ptrdiff_t>(std::min(cfg_.fb_terms, ranked.size())),
-                      ranked.end(), [](auto& a, auto& b) { return a.second > b.second; });
-
-    std::string expanded = ctx.query;
-    std::size_t added = 0;
-    for (auto& [term, f] : ranked) {
-        if (added >= cfg_.fb_terms)
-            break;
-        expanded += ' ';
-        expanded += term;
-        ++added;
-    }
-    ctx.query = expanded;
-    ctx.trace.push_back("prf: +" + std::to_string(added) + " terms");
     return ctx;
 }
 
@@ -270,6 +203,24 @@ Result<void> feature_rerank(std::string_view query, std::vector<Hit>& cands,
     }
     return {};
 }
+
+class FeatureRerankStage final : public RetrievalStage {
+  public:
+    std::string_view name() const noexcept override { return "feature_rerank"; }
+    Result<Context> process(Context ctx) const override {
+        if (!ctx.corpus || ctx.candidates.empty())
+            return ctx;
+        if (auto result = feature_rerank(ctx.query, ctx.candidates, *ctx.corpus); !result)
+            return unexpected(result.error());
+        std::sort(ctx.candidates.begin(), ctx.candidates.end(),
+                  [](const Hit& left, const Hit& right) {
+                      if (left.score.get() != right.score.get())
+                          return left.score.get() > right.score.get();
+                      return left.chunk.get() < right.chunk.get();
+                  });
+        return ctx;
+    }
+};
 } // namespace
 
 Pipeline Pipeline::standard() { return standard_with(HybridRetrieveConfig{}); }
@@ -278,7 +229,7 @@ Pipeline Pipeline::standard_with(HybridRetrieveConfig cfg) {
     Pipeline p;
     p.add(std::make_shared<HybridRetrieveStage>(std::move(cfg)))
         .add(std::make_shared<FilterStage>())
-        .add(std::make_shared<RerankStage>("feature_rerank", feature_rerank))
+        .add(std::make_shared<FeatureRerankStage>())
         .add(std::make_shared<TopKStage>());
     return p;
 }
@@ -291,7 +242,7 @@ Pipeline Pipeline::quality_with(HybridRetrieveConfig cfg, float mmr_lambda) {
     Pipeline p;
     p.add(std::make_shared<HybridRetrieveStage>(std::move(cfg)))
         .add(std::make_shared<FilterStage>())
-        .add(std::make_shared<RerankStage>("feature_rerank", feature_rerank))
+        .add(std::make_shared<FeatureRerankStage>())
         // MMR runs on the RELEVANCE-ORDERED candidate pool, before the trim to k.
         // Order matters: after TopKStage there would be nothing left to diversify
         // — the duplicates it exists to displace would already have been kept and
@@ -306,7 +257,7 @@ Pipeline Pipeline::quality_context_with(HybridRetrieveConfig cfg, float mmr_lamb
     Pipeline p;
     p.add(std::make_shared<HybridRetrieveStage>(std::move(cfg)))
         .add(std::make_shared<FilterStage>())
-        .add(std::make_shared<RerankStage>("feature_rerank", feature_rerank))
+        .add(std::make_shared<FeatureRerankStage>())
         .add(rerank::make_mmr_stage(mmr_lambda))
         .add(std::make_shared<ParentStitchStage>(max_gap))
         .add(std::make_shared<TopKStage>());
@@ -321,7 +272,7 @@ Pipeline Pipeline::context_with(HybridRetrieveConfig cfg, std::size_t max_gap) {
     Pipeline p;
     p.add(std::make_shared<HybridRetrieveStage>(std::move(cfg)))
         .add(std::make_shared<FilterStage>())
-        .add(std::make_shared<RerankStage>("feature_rerank", feature_rerank))
+        .add(std::make_shared<FeatureRerankStage>())
         // ParentStitch folds adjacent same-document fragments into their
         // higher-ranked sibling — so it must run AFTER the rerank that establishes
         // that order, and BEFORE the top-k that would trim away the pool it

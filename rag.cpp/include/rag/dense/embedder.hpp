@@ -11,10 +11,9 @@
 // both as concrete types and via the type-erased `AnyEmbedder` so a pipeline
 // can hold one chosen at runtime.
 
-#include <chrono>
 #include <array>
+#include <chrono>
 #include <memory>
-#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -29,25 +28,22 @@ namespace rag::dense {
 // ─────────────────────────────────────────────────────────────────────────────
 // HttpTransport — the injectable network seam.
 //
-// A single POST primitive, but rich enough for every hosted backend: custom
-// headers carry Bearer auth (OpenAI, TEI, Cohere) and `tls` requests an
-// encrypted connection. The default transport speaks plaintext HTTP/1.1 for
-// localhost model servers; for TLS endpoints inject a transport backed by your
-// own TLS stack — that is exactly why the seam exists.
+// A single bounded POST primitive for the loopback embedding backend. It has no
+// custom-header or TLS surface because remote providers are outside this core.
 // ─────────────────────────────────────────────────────────────────────────────
 struct HttpResponse {
-    int         status = 0;
+    int status = 0;
     std::string body;
 };
 
 struct HttpRequest {
     std::string_view host;
-    std::uint16_t    port = 80;
+    std::uint16_t port = 80;
     std::string_view path;
-    std::string_view body;                                   // JSON payload
-    std::vector<std::pair<std::string, std::string>> headers; // extra headers
-    bool             tls     = false;                        // https
-    std::chrono::milliseconds timeout{30'000};
+    std::string_view body; // JSON payload
+    std::chrono::milliseconds connect_timeout{5'000};
+    std::chrono::milliseconds read_timeout{30'000};
+    std::size_t max_response_bytes = 16 * 1024 * 1024;
 };
 
 struct HttpTransport {
@@ -58,10 +54,17 @@ struct HttpTransport {
     [[nodiscard]] virtual Result<HttpResponse> post(const HttpRequest& req) const = 0;
 
     // Back-compat convenience: plaintext JSON POST with no extra headers.
-    [[nodiscard]] Result<HttpResponse>
-    post_json(std::string_view host, std::uint16_t port, std::string_view path,
-              std::string_view body, std::chrono::milliseconds timeout) const {
-        return post(HttpRequest{host, port, path, body, {}, false, timeout});
+    [[nodiscard]] Result<HttpResponse> post_json(std::string_view host, std::uint16_t port,
+                                                 std::string_view path, std::string_view body,
+                                                 std::chrono::milliseconds timeout) const {
+        HttpRequest request;
+        request.host = host;
+        request.port = port;
+        request.path = path;
+        request.body = body;
+        request.connect_timeout = timeout;
+        request.read_timeout = timeout;
+        return post(request);
     }
 };
 
@@ -78,9 +81,7 @@ struct HttpTransport {
 //
 //   • a hosted/remote embedder is latency-bound — a dozen concurrent POSTs
 //     costs the client nothing and multiplies throughput;
-//   • an in-process embedder (ONNX Runtime, llama.cpp) already saturates every
-//     core inside a single `embed` call, so issuing batches concurrently only
-//     oversubscribes the machine and makes things slower;
+//   • a caller-supplied in-process embedder may already saturate every core;
 //   • a pure-CPU toy embedder scales with the core count.
 //
 // So an embedder MAY expose `max_concurrency()`; if it doesn't, we assume 1
@@ -105,21 +106,23 @@ template <Embedder E>
 // AnyEmbedder — type-erased embedder for the runtime-polymorphic path.
 // ─────────────────────────────────────────────────────────────────────────────
 class AnyEmbedder {
-public:
+  public:
     template <Embedder E>
-    explicit AnyEmbedder(E e)
-        : self_(std::make_shared<Model<E>>(std::move(e))) {}
+    explicit AnyEmbedder(E e) : self_(std::make_shared<Model<E>>(std::move(e))) {}
 
     [[nodiscard]] std::size_t dimension() const { return self_->dimension(); }
     [[nodiscard]] std::string_view identity() const { return self_->identity(); }
-    [[nodiscard]] Result<std::vector<Vector>>
-    embed(std::span<const std::string> texts) const { return self_->embed(texts); }
+    [[nodiscard]] Result<std::vector<Vector>> embed(std::span<const std::string> texts) const {
+        return self_->embed(texts);
+    }
 
     [[nodiscard]] Result<Vector> embed_one(const std::string& text) const {
         std::array<std::string, 1> one{text};
         auto r = embed(one);
-        if (!r) return unexpected(r.error());
-        if (r->empty()) return fail<Vector>(Errc::transport_error, "empty embed result");
+        if (!r)
+            return unexpected(r.error());
+        if (r->empty())
+            return fail<Vector>(Errc::transport_error, "empty embed result");
         return std::move((*r)[0]);
     }
 
@@ -127,7 +130,7 @@ public:
     // 1 unless the concrete embedder opted in (see ConcurrencyAware above).
     [[nodiscard]] std::size_t max_concurrency() const { return self_->max_concurrency(); }
 
-private:
+  private:
     struct Concept {
         virtual ~Concept() = default;
         virtual std::size_t dimension() const = 0;
@@ -135,8 +138,7 @@ private:
         virtual Result<std::vector<Vector>> embed(std::span<const std::string>) const = 0;
         virtual std::size_t max_concurrency() const = 0;
     };
-    template <Embedder E>
-    struct Model final : Concept {
+    template <Embedder E> struct Model final : Concept {
         E e;
         explicit Model(E x) : e(std::move(x)) {}
         std::size_t dimension() const override { return e.dimension(); }

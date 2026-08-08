@@ -8,8 +8,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <mutex>
 
 #include <nlohmann/json.hpp>
@@ -26,7 +28,6 @@ void Corpus::relink_meta() {
 void Corpus::move_from(Corpus&& o) {
     cfg_ = std::move(o.cfg_);
     embedder_ = std::move(o.embedder_);
-    contextualizer_ = std::move(o.contextualizer_);
     docs_ = std::move(o.docs_);
     chunks_ = std::move(o.chunks_);
     bm25_ = std::move(o.bm25_);
@@ -66,6 +67,14 @@ Result<DocId> Corpus::upsert_document(std::string uri, std::string text, Metadat
 
 Result<DocId> Corpus::add_document_locked(std::string uri, std::string text, Metadata meta,
                                           std::string title) {
+    if (docs_.size() >= store::kMaxDocuments || docs_.size() >= DocId::invalid().get())
+        return fail<DocId>(Errc::invalid_argument, "document limit exceeded");
+    if (uri.size() > UINT32_MAX || text.size() > UINT32_MAX || title.size() > UINT32_MAX ||
+        meta.size() > store::kMaxMetadataEntries)
+        return fail<DocId>(Errc::invalid_argument, "document field limit exceeded");
+    for (const auto& [key, value] : meta)
+        if (key.size() > UINT32_MAX || value.size() > UINT32_MAX)
+            return fail<DocId>(Errc::invalid_argument, "metadata field limit exceeded");
     // Log BEFORE mutating. If the append fails, nothing has changed and the
     // caller gets an honest error; logging after the mutation would leave a
     // corpus that has a document its log does not, so a crash would silently
@@ -91,33 +100,14 @@ Result<DocId> Corpus::add_document_locked(std::string uri, std::string text, Met
     docs_.push_back(std::move(doc));
     const Document& stored = docs_.back();
 
-    auto new_chunks = [&] {
-        if (cfg_.chunking != CorpusConfig::Chunking::semantic)
-            return text::chunk_document(did, stored.text, cfg_.chunk);
-        // Semantic chunking prefers the embedder (true topical drift) but must
-        // degrade rather than fail: an unavailable backend should change chunk
-        // BOUNDARIES, never make ingest impossible.
-        if (embedder_) {
-            if (auto sc = text::semantic_chunk(did, stored.text, *embedder_, cfg_.semantic))
-                return std::move(*sc);
-        }
-        return text::semantic_chunk_lexical(did, stored.text, cfg_.semantic);
-    }();
-
-    // Contextual Retrieval, before anything is indexed.
-    //
-    // Order matters and is not arbitrary: indexed_text() is context ⊕ body, and
-    // it is what feeds BOTH bm25_.add() below and the embedder in
-    // embed_pending(). Situating the chunk after either of those would leave
-    // the indexes describing text no longer in the store. So this runs here,
-    // between chunking and id assignment, and nowhere else.
-    //
-    // contextualize() APPENDS to the existing `context` rather than replacing
-    // it, so the structural chunker's heading breadcrumb survives — the two
-    // signals are complementary (where in the document vs. what the document
-    // is about).
-    if (cfg_.contextual)
-        text::contextualize(new_chunks, stored.text, contextualizer_);
+    auto new_chunks = text::chunk_document(did, stored.text, cfg_.chunk);
+    if (new_chunks.size() >
+            store::kMaxChunks - std::min<std::size_t>(chunks_.size(), store::kMaxChunks) ||
+        new_chunks.size() > static_cast<std::size_t>(ChunkId::invalid().get()) -
+                                std::min<std::size_t>(chunks_.size(), ChunkId::invalid().get())) {
+        docs_.pop_back();
+        return fail<DocId>(Errc::invalid_argument, "chunk limit exceeded");
+    }
 
     for (auto& ch : new_chunks) {
         ChunkId cid{static_cast<std::uint32_t>(chunks_.size())};
@@ -199,7 +189,45 @@ Result<void> Corpus::embed_pending() {
             return;
         }
         auto& vecs = *res;
-        for (std::size_t j = 0; j < vecs.size() && off + j < end; ++j)
+        if (vecs.size() != end - off) {
+            std::lock_guard lk(err_mu);
+            if (!failed.exchange(true, std::memory_order_acq_rel))
+                first_err = Error{Errc::dimension_mismatch, "embedding response count mismatch"};
+            return;
+        }
+        const std::size_t dimension = embedder_->dimension();
+        for (auto& vector : vecs) {
+            if (dimension == 0 || dimension > store::kMaxVectorDimension ||
+                vector.size() != dimension) {
+                std::lock_guard lk(err_mu);
+                if (!failed.exchange(true, std::memory_order_acq_rel))
+                    first_err =
+                        Error{Errc::dimension_mismatch, "embedding response dimension mismatch"};
+                return;
+            }
+            double norm = 0.0;
+            for (const float value : vector) {
+                if (!std::isfinite(value)) {
+                    std::lock_guard lk(err_mu);
+                    if (!failed.exchange(true, std::memory_order_acq_rel))
+                        first_err =
+                            Error{Errc::invalid_argument, "embedding contains a non-finite value"};
+                    return;
+                }
+                norm += static_cast<double>(value) * value;
+            }
+            if (!std::isfinite(norm) || norm <= std::numeric_limits<double>::min()) {
+                std::lock_guard lk(err_mu);
+                if (!failed.exchange(true, std::memory_order_acq_rel))
+                    first_err =
+                        Error{Errc::invalid_argument, "embedding must have a finite non-zero norm"};
+                return;
+            }
+            const float inverse = static_cast<float>(1.0 / std::sqrt(norm));
+            for (float& value : vector)
+                value *= inverse;
+        }
+        for (std::size_t j = 0; j < vecs.size(); ++j)
             chunks_[pending[off + j]].embedding = std::move(vecs[j]);
     };
 
@@ -603,65 +631,71 @@ bool Corpus::passes_locked(ChunkId id, const MetaFilter& f) const {
 // BM25 (inverted index), HNSW (ANN graph). CRC-verified on load.
 // ─────────────────────────────────────────────────────────────────────────────
 Result<void> Corpus::save(const std::string& path) const {
-    // save() splits into two phases that want very different lock treatment.
-    //
-    //   1. SNAPSHOT — walk docs_/chunks_/bm25_/hnsw_ and pack them into section
-    //      blobs. This touches corpus state, so it must hold a lock, and the
-    //      lock is what makes the snapshot consistent: no document can be
-    //      appended halfway through serializing the arrays.
-    //
-    //   2. WRITE — concatenate those blobs, CRC the result, write it to a temp
-    //      file, fsync, rename, fsync the directory. This touches NO corpus
-    //      state whatsoever; the Container owns its own copies.
-    //
-    // Phase 2 is the expensive one — measured on a 20k-doc corpus it is ~24 of
-    // the ~28 ms, almost all of it CRC and the big concatenating copy — and it
-    // used to run with the shared lock still held. Readers did not care (they
-    // share it too), but every WRITER blocked for the whole thing: an
-    // add_document() concurrent with a save loop measured 6.0 ms mean against
-    // 0.001 ms uncontended. Dropping the lock between the phases takes that
-    // stall down to just the snapshot.
-    store::Container snap;
-    std::uint64_t at_epoch = 0;
-    {
-        std::shared_lock lk(mu_);
-        auto s = snapshot_locked();
-        if (!s)
-            return unexpected(s.error());
-        snap = std::move(*s);
-        at_epoch = epoch_;
-    }
+    try {
+        // save() splits into two phases that want very different lock treatment.
+        //
+        //   1. SNAPSHOT — walk docs_/chunks_/bm25_/hnsw_ and pack them into section
+        //      blobs. This touches corpus state, so it must hold a lock, and the
+        //      lock is what makes the snapshot consistent: no document can be
+        //      appended halfway through serializing the arrays.
+        //
+        //   2. WRITE — concatenate those blobs, CRC the result, write it to a temp
+        //      file, fsync, rename, fsync the directory. This touches NO corpus
+        //      state whatsoever; the Container owns its own copies.
+        //
+        // Phase 2 is the expensive one — measured on a 20k-doc corpus it is ~24 of
+        // the ~28 ms, almost all of it CRC and the big concatenating copy — and it
+        // used to run with the shared lock still held. Readers did not care (they
+        // share it too), but every WRITER blocked for the whole thing: an
+        // add_document() concurrent with a save loop measured 6.0 ms mean against
+        // 0.001 ms uncontended. Dropping the lock between the phases takes that
+        // stall down to just the snapshot.
+        store::Container snap;
+        std::uint64_t at_epoch = 0;
+        {
+            std::shared_lock lk(mu_);
+            auto s = snapshot_locked();
+            if (!s)
+                return unexpected(s.error());
+            snap = std::move(*s);
+            at_epoch = epoch_;
+        }
 
-    // PUBLISH, in epoch order.
-    //
-    // Splitting the phases means two concurrent save()s can interleave as:
-    // A snapshots at epoch 10, B snapshots at epoch 20, B renames, A renames —
-    // and the file on disk goes BACKWARDS to epoch 10.
-    //
-    // This is rare but real, and it took an honest harness to see it. A loop
-    // that loads the file while savers and a writer run showed nothing at all
-    // with 3-8 savers on 8 cores: the savers stay roughly in lockstep, so their
-    // renames happen to come out in snapshot order. Only when the savers are
-    // OVERSUBSCRIBED (16 and 32 threads on 8 cores, so the scheduler preempts
-    // one between its snapshot and its rename) does the on-disk doc count go
-    // backwards — 2 and 4 times per 300 loads. With this gate: 0, at 16, 32 and
-    // 64 savers.
-    //
-    // The rename is therefore serialized and gated on the epoch that last
-    // reached this path. A snapshot that lost the race is DROPPED, not written:
-    // its content is a strict prefix of what is already there, so discarding it
-    // loses nothing, and reporting success is honest — the caller asked for the
-    // state at their save() call to be durable, and a newer state that contains
-    // it is on disk.
-    auto& st = path_state(path);
-    std::lock_guard pk(st.mu);
-    if (st.any && st.published > at_epoch)
+        // PUBLISH, in epoch order.
+        //
+        // Splitting the phases means two concurrent save()s can interleave as:
+        // A snapshots at epoch 10, B snapshots at epoch 20, B renames, A renames —
+        // and the file on disk goes BACKWARDS to epoch 10.
+        //
+        // This is rare but real, and it took an honest harness to see it. A loop
+        // that loads the file while savers and a writer run showed nothing at all
+        // with 3-8 savers on 8 cores: the savers stay roughly in lockstep, so their
+        // renames happen to come out in snapshot order. Only when the savers are
+        // OVERSUBSCRIBED (16 and 32 threads on 8 cores, so the scheduler preempts
+        // one between its snapshot and its rename) does the on-disk doc count go
+        // backwards — 2 and 4 times per 300 loads. With this gate: 0, at 16, 32 and
+        // 64 savers.
+        //
+        // The rename is therefore serialized and gated on the epoch that last
+        // reached this path. A snapshot that lost the race is DROPPED, not written:
+        // its content is a strict prefix of what is already there, so discarding it
+        // loses nothing, and reporting success is honest — the caller asked for the
+        // state at their save() call to be durable, and a newer state that contains
+        // it is on disk.
+        auto& st = path_state(path);
+        std::lock_guard pk(st.mu);
+        if (st.any && st.published > at_epoch)
+            return {};
+        if (auto r = snap.write_file(path); !r)
+            return r;
+        st.published = at_epoch;
+        st.any = true;
         return {};
-    if (auto r = snap.write_file(path); !r)
-        return r;
-    st.published = at_epoch;
-    st.any = true;
-    return {};
+    } catch (const std::exception& error) {
+        return fail<void>(Errc::io_error, std::string("save failed: ") + error.what());
+    } catch (...) {
+        return fail<void>(Errc::io_error, "save failed");
+    }
 }
 
 // ─── Write-ahead log ────────────────────────────────────────────────────
@@ -771,7 +805,6 @@ Result<store::Container> Corpus::snapshot_locked() const {
         // adding a document chunked it at the default 40, so one store ended up
         // holding two incompatible chunk granularities. Both are ingest policy
         // and both round-trip.
-        m["contextual"] = cfg_.contextual;
         m["chunk"] = {{"max_lines", cfg_.chunk.max_lines},
                       {"max_chars", cfg_.chunk.max_chars},
                       {"overlap_lines", cfg_.chunk.overlap_lines},
@@ -874,15 +907,27 @@ Result<Corpus> Corpus::load(const std::string& path) {
     auto cont = store::Container::read_file(path);
     if (!cont)
         return unexpected(cont.error());
+    try {
 
-    Corpus c;
+        Corpus c;
 
-    if (const std::string* meta = cont->get(store::Tag::meta)) {
-        auto m = json::parse(*meta, nullptr, false);
-        if (!m.is_discarded()) {
+        const std::string* meta = cont->get(store::Tag::meta);
+        const std::string* docs = cont->get(store::Tag::docs);
+        const std::string* chunks = cont->get(store::Tag::chunks);
+        const std::string* bm25 = cont->get(store::Tag::bm25);
+        if (meta == nullptr || docs == nullptr || chunks == nullptr || bm25 == nullptr)
+            return fail<Corpus>(Errc::corrupt_index, "missing required section");
+        if (((cont->flags() & store::kHasEmbeddings) != 0) != cont->has(store::Tag::embed) ||
+            ((cont->flags() & store::kHasHnsw) != 0) != cont->has(store::Tag::hnsw))
+            return fail<Corpus>(Errc::corrupt_index, "section flags are inconsistent");
+
+        {
+            auto m = json::parse(*meta, nullptr, false);
+            if (m.is_discarded() || !m.is_object()) {
+                return fail<Corpus>(Errc::corrupt_index, "malformed metadata JSON");
+            }
             c.cfg_.hnsw_threshold = m.value("hnsw_threshold", c.cfg_.hnsw_threshold);
             c.cfg_.embed_batch = m.value("embed_batch", c.cfg_.embed_batch);
-            c.cfg_.contextual = m.value("contextual", c.cfg_.contextual);
             if (m.contains("chunk")) {
                 const auto& ck = m["chunk"];
                 c.cfg_.chunk.max_lines = ck.value("max_lines", c.cfg_.chunk.max_lines);
@@ -901,112 +946,171 @@ Result<Corpus> Corpus::load(const std::string& path) {
                     c.cfg_.chunk.policy.reserved_tokens = p.value("reserved_tokens", std::size_t{});
                     c.cfg_.chunk.policy.document_prefix = p.value("document_prefix", std::string{});
                     c.cfg_.chunk.policy.query_prefix = p.value("query_prefix", std::string{});
+                    const int counting_mode = p.value("counting_mode", 1);
+                    const int invalid_utf8 = p.value("invalid_utf8", 0);
+                    if (counting_mode < 0 || counting_mode > 1 || invalid_utf8 < 0 ||
+                        invalid_utf8 > 1)
+                        return fail<Corpus>(Errc::corrupt_index, "invalid persisted chunking enum");
                     c.cfg_.chunk.policy.counting_mode =
-                        static_cast<text::TokenCountingMode>(p.value("counting_mode", 1));
+                        static_cast<text::TokenCountingMode>(counting_mode);
                     c.cfg_.chunk.policy.invalid_utf8 =
-                        static_cast<text::InvalidUtf8Policy>(p.value("invalid_utf8", 0));
+                        static_cast<text::InvalidUtf8Policy>(invalid_utf8);
                 }
             }
             if (m.contains("bm25")) {
                 c.cfg_.bm25.k1 = m["bm25"].value("k1", c.cfg_.bm25.k1);
                 c.cfg_.bm25.b = m["bm25"].value("b", c.cfg_.bm25.b);
             }
+            if (c.cfg_.embed_batch == 0 || c.cfg_.embed_batch > store::kMaxChunks ||
+                c.cfg_.hnsw_threshold > store::kMaxChunks ||
+                c.cfg_.chunk.policy.dimension > store::kMaxVectorDimension ||
+                c.cfg_.chunk.max_lines > store::kMaxChunks ||
+                c.cfg_.chunk.max_chars > store::kMaxWalRecordBytes ||
+                c.cfg_.chunk.overlap_lines > c.cfg_.chunk.max_lines ||
+                c.cfg_.chunk.policy.overlap_tokens > c.cfg_.chunk.policy.max_tokens ||
+                c.cfg_.chunk.policy.reserved_tokens > c.cfg_.chunk.policy.max_tokens ||
+                !std::isfinite(c.cfg_.bm25.k1) || !std::isfinite(c.cfg_.bm25.b) ||
+                c.cfg_.bm25.k1 < 0.0F || c.cfg_.bm25.b < 0.0F || c.cfg_.bm25.b > 1.0F)
+                return fail<Corpus>(Errc::corrupt_index, "invalid persisted configuration");
         }
-    }
 
-    // DOCS.
-    if (const std::string* docs = cont->get(store::Tag::docs)) {
-        store::Reader r(*docs);
-        std::uint32_t n;
-        if (!r.u(n))
-            return fail<Corpus>(Errc::corrupt_index, "docs count");
-        c.docs_.reserve(n);
-        for (std::uint32_t i = 0; i < n; ++i) {
-            Document d;
-            std::uint32_t id;
-            if (!r.u(id) || !r.str(d.uri) || !r.str(d.title) || !r.str(d.text))
-                return fail<Corpus>(Errc::corrupt_index, "doc");
-            d.id = DocId{id};
-            std::uint32_t mn;
-            if (!r.u(mn))
-                return fail<Corpus>(Errc::corrupt_index, "doc meta");
-            for (std::uint32_t j = 0; j < mn; ++j) {
-                std::string k, v;
-                if (!r.str(k) || !r.str(v))
-                    return fail<Corpus>(Errc::corrupt_index, "doc meta kv");
-                d.meta[k] = v;
+        // DOCS.
+        {
+            store::Reader r(*docs);
+            std::uint32_t n;
+            if (!r.u(n) || n > store::kMaxDocuments || n > (docs->size() - 4) / 20)
+                return fail<Corpus>(Errc::corrupt_index, "docs count");
+            c.docs_.reserve(n);
+            for (std::uint32_t i = 0; i < n; ++i) {
+                Document d;
+                std::uint32_t id;
+                if (!r.u(id) || id != i || !r.str(d.uri) || !r.str(d.title) || !r.str(d.text))
+                    return fail<Corpus>(Errc::corrupt_index, "doc");
+                d.id = DocId{id};
+                std::uint32_t mn;
+                if (!r.u(mn) || mn > store::kMaxMetadataEntries || mn > r.remaining() / 8)
+                    return fail<Corpus>(Errc::corrupt_index, "doc meta");
+                for (std::uint32_t j = 0; j < mn; ++j) {
+                    std::string k, v;
+                    if (!r.str(k) || !r.str(v))
+                        return fail<Corpus>(Errc::corrupt_index, "doc meta kv");
+                    d.meta[k] = v;
+                }
+                c.docs_.push_back(std::move(d));
             }
-            c.docs_.push_back(std::move(d));
+            if (r.remaining() != 0)
+                return fail<Corpus>(Errc::corrupt_index, "trailing document data");
         }
-    }
 
-    // CHNK.
-    if (const std::string* chunks = cont->get(store::Tag::chunks)) {
-        store::Reader r(*chunks);
-        std::uint32_t n;
-        if (!r.u(n))
-            return fail<Corpus>(Errc::corrupt_index, "chunk count");
-        c.chunks_.reserve(n);
-        for (std::uint32_t i = 0; i < n; ++i) {
-            Chunk ch;
-            std::uint32_t id, doc;
-            if (!r.u(id) || !r.u(doc) || !r.str(ch.text) || !r.str(ch.context) ||
-                !r.u(ch.start_line) || !r.u(ch.end_line))
-                return fail<Corpus>(Errc::corrupt_index, "chunk");
-            ch.id = ChunkId{id};
-            ch.doc = DocId{doc};
-            c.chunks_.push_back(std::move(ch));
+        // CHNK.
+        {
+            store::Reader r(*chunks);
+            std::uint32_t n;
+            if (!r.u(n) || n > store::kMaxChunks || n > (chunks->size() - 4) / 24)
+                return fail<Corpus>(Errc::corrupt_index, "chunk count");
+            c.chunks_.reserve(n);
+            for (std::uint32_t i = 0; i < n; ++i) {
+                Chunk ch;
+                std::uint32_t id, doc;
+                if (!r.u(id) || id != i || !r.u(doc) || doc >= c.docs_.size() || !r.str(ch.text) ||
+                    !r.str(ch.context) || !r.u(ch.start_line) || !r.u(ch.end_line) ||
+                    ch.start_line > ch.end_line)
+                    return fail<Corpus>(Errc::corrupt_index, "chunk");
+                ch.id = ChunkId{id};
+                ch.doc = DocId{doc};
+                c.chunks_.push_back(std::move(ch));
+            }
+            if (r.remaining() != 0)
+                return fail<Corpus>(Errc::corrupt_index, "trailing chunk data");
         }
-    }
-    // Link all chunk meta pointers now that docs_ and chunks_ are populated.
-    c.relink_meta();
-    c.meta_stale_ = false;
+        // Link all chunk meta pointers now that docs_ and chunks_ are populated.
+        c.relink_meta();
+        c.meta_stale_ = false;
 
-    // EMBD (parallel to CHNK).
-    if (const std::string* emb = cont->get(store::Tag::embed)) {
-        store::Reader r(*emb);
-        for (auto& ch : c.chunks_) {
-            std::uint32_t dim;
-            if (!r.u(dim))
-                break;
-            if (dim == 0)
-                continue;
-            std::string_view raw;
-            if (!r.bytes(dim * sizeof(float), raw))
-                return fail<Corpus>(Errc::corrupt_index, "embedding");
-            ch.embedding.resize(dim);
-            std::memcpy(ch.embedding.data(), raw.data(), dim * sizeof(float));
+        // EMBD (parallel to CHNK).
+        if (const std::string* emb = cont->get(store::Tag::embed)) {
+            store::Reader r(*emb);
+            std::size_t expected_dimension = 0;
+            for (auto& ch : c.chunks_) {
+                std::uint32_t dim;
+                if (!r.u(dim))
+                    return fail<Corpus>(Errc::corrupt_index, "embedding count");
+                if (dim == 0)
+                    continue;
+                if (dim > store::kMaxVectorDimension ||
+                    (expected_dimension != 0 && dim != expected_dimension))
+                    return fail<Corpus>(Errc::corrupt_index, "mixed embedding dimensions");
+                expected_dimension = dim;
+                std::string_view raw;
+                if (dim > r.remaining() / sizeof(float) ||
+                    !r.bytes(static_cast<std::size_t>(dim) * sizeof(float), raw))
+                    return fail<Corpus>(Errc::corrupt_index, "embedding");
+                ch.embedding.resize(dim);
+                std::memcpy(ch.embedding.data(), raw.data(),
+                            static_cast<std::size_t>(dim) * sizeof(float));
+                double squared_norm = 0.0;
+                for (const float value : ch.embedding) {
+                    if (!std::isfinite(value))
+                        return fail<Corpus>(Errc::corrupt_index, "non-finite embedding");
+                    squared_norm += static_cast<double>(value) * value;
+                }
+                if (!std::isfinite(squared_norm) ||
+                    squared_norm <= std::numeric_limits<double>::min() ||
+                    std::abs(squared_norm - 1.0) > 0.01)
+                    return fail<Corpus>(Errc::corrupt_index, "embedding is not normalized");
+            }
+            if (r.remaining() != 0)
+                return fail<Corpus>(Errc::corrupt_index, "trailing embedding data");
         }
-    }
 
-    // BM25 (required).
-    if (const std::string* b = cont->get(store::Tag::bm25)) {
-        auto idx = lexical::Bm25Index::deserialize(*b);
-        if (!idx)
-            return unexpected(idx.error());
-        c.bm25_ = std::move(*idx);
-    }
-    // HNSW (optional).
-    if (const std::string* h = cont->get(store::Tag::hnsw)) {
-        auto idx = HnswIndex::deserialize(*h);
-        if (!idx)
-            return unexpected(idx.error());
-        c.hnsw_ = std::move(*idx);
-    }
-    // TOMB (optional; absent in format minor 0 and when nothing is deleted).
-    if (const std::string* t = cont->get(store::Tag::tomb)) {
-        store::Reader r(*t);
-        std::uint32_t n;
-        if (!r.u(n))
-            return fail<Corpus>(Errc::corrupt_index, "tomb count");
-        for (std::uint32_t i = 0; i < n; ++i) {
-            std::uint32_t id;
-            if (!r.u(id))
-                return fail<Corpus>(Errc::corrupt_index, "tomb id");
-            c.deleted_docs_.insert(id);
+        // BM25 (required).
+        {
+            auto idx = lexical::Bm25Index::deserialize(*bm25);
+            if (!idx)
+                return unexpected(idx.error());
+            c.bm25_ = std::move(*idx);
         }
+        // HNSW (optional).
+        if (const std::string* h = cont->get(store::Tag::hnsw)) {
+            auto idx = HnswIndex::deserialize(*h);
+            if (!idx)
+                return unexpected(idx.error());
+            c.hnsw_ = std::move(*idx);
+        }
+        // TOMB (optional; absent in format minor 0 and when nothing is deleted).
+        if (const std::string* t = cont->get(store::Tag::tomb)) {
+            store::Reader r(*t);
+            std::uint32_t n;
+            if (!r.u(n) || n > store::kMaxDocuments || n > r.remaining() / sizeof(std::uint32_t))
+                return fail<Corpus>(Errc::corrupt_index, "tomb count");
+            for (std::uint32_t i = 0; i < n; ++i) {
+                std::uint32_t id;
+                if (!r.u(id) || id >= c.docs_.size())
+                    return fail<Corpus>(Errc::corrupt_index, "tomb id");
+                if (!c.deleted_docs_.insert(id).second)
+                    return fail<Corpus>(Errc::corrupt_index, "duplicate tomb id");
+            }
+            if (r.remaining() != 0)
+                return fail<Corpus>(Errc::corrupt_index, "trailing tomb data");
+        }
+        // Epochs are process-local. When a file is reopened in the same process,
+        // continue from the path's publication epoch so a subsequent tombstone or
+        // upsert cannot be mistaken for an older concurrent snapshot and dropped.
+        auto& publication = path_state(path);
+        {
+            std::lock_guard lock(publication.mu);
+            if (publication.any)
+                c.epoch_ = publication.published;
+        }
+        return c;
+    } catch (const std::bad_alloc&) {
+        return fail<Corpus>(Errc::corrupt_index, "index allocation failed");
+    } catch (const std::exception& error) {
+        return fail<Corpus>(Errc::corrupt_index,
+                            std::string("index parse failed: ") + error.what());
+    } catch (...) {
+        return fail<Corpus>(Errc::corrupt_index, "index parse failed");
     }
-    return c;
 }
 
 } // namespace rag::index

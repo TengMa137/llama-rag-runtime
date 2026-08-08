@@ -25,17 +25,16 @@
 namespace rag::rerank {
 
 struct MmrConfig {
-    float       lambda = 0.5f;   // relevance↔diversity trade-off in [0,1]
-    std::size_t k      = 10;     // final result size
+    float lambda = 0.5f; // relevance↔diversity trade-off in [0,1]
+    std::size_t k = 10;  // final result size
 };
 
 // Re-order `candidates` (assumed relevance-sorted, carrying relevance in
 // .score) by MMR against each other, returning the top-k diversified hits.
-[[nodiscard]] std::vector<Hit>
-mmr(const index::Corpus& corpus, std::span<const Hit> candidates, MmrConfig cfg = {});
+[[nodiscard]] std::vector<Hit> mmr(const index::Corpus& corpus, std::span<const Hit> candidates,
+                                   MmrConfig cfg = {});
 
 // A pipeline stage form: diversify the running candidate set in place.
-[[nodiscard]] pipeline::StagePtr
-make_mmr_stage(float lambda = 0.5f, std::string label = "mmr");
+[[nodiscard]] pipeline::StagePtr make_mmr_stage(float lambda = 0.5f, std::string label = "mmr");
 
 } // namespace rag::rerank

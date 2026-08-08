@@ -29,6 +29,8 @@ set(LRS_FORMAT_SOURCES
   src/mobile.cpp
   src/service.cpp
   tests/tests.cpp
+  tests/rag_core_tests.cpp
+  tests/rag_integration_tests.cpp
   tools/mobile_smoke.cpp
   tools/rag_eval.cpp
   tools/spec_check.cpp)
@@ -71,7 +73,7 @@ endif()
 if(LRS_BUILD_COORDINATOR)
   add_library(lrs_bridge STATIC src/bridge.cpp)
   target_include_directories(lrs_bridge PUBLIC include)
-  target_link_libraries(lrs_bridge PRIVATE rag::rag)
+  target_link_libraries(lrs_bridge PRIVATE rag::core)
   target_compile_features(lrs_bridge PRIVATE cxx_std_20)
 
   find_package(Threads REQUIRED)
@@ -100,10 +102,10 @@ if(LRS_BUILD_MOBILE)
   add_library(lrs_mobile SHARED src/mobile.cpp)
   set_target_properties(lrs_mobile PROPERTIES
     CXX_VISIBILITY_PRESET hidden
-    OUTPUT_NAME ragcpp_mobile
+    OUTPUT_NAME rag_mobile
     VISIBILITY_INLINES_HIDDEN YES)
   target_include_directories(lrs_mobile PUBLIC include)
-  target_link_libraries(lrs_mobile PRIVATE rag::rag)
+  target_link_libraries(lrs_mobile PRIVATE rag::core)
   target_compile_features(lrs_mobile PRIVATE cxx_std_20)
 endif()
 
@@ -128,7 +130,7 @@ if(LRS_BUILD_SPEC_CHECK)
 endif()
 
 add_executable(lrs-rag-eval tools/rag_eval.cpp)
-target_link_libraries(lrs-rag-eval PRIVATE rag::rag)
+target_link_libraries(lrs-rag-eval PRIVATE rag::core)
 target_compile_features(lrs-rag-eval PRIVATE cxx_std_20)
 target_compile_definitions(lrs-rag-eval PRIVATE LRS_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 set_target_properties(lrs-rag-eval PROPERTIES
@@ -158,13 +160,30 @@ foreach(t IN LISTS LRS_WARNING_TARGETS)
   endif()
 endforeach()
 
+if(LRS_BUILD_TESTS)
+  add_executable(rag-core-tests tests/rag_core_tests.cpp)
+  target_link_libraries(rag-core-tests PRIVATE rag::core)
+  target_compile_features(rag-core-tests PRIVATE cxx_std_20)
+  target_compile_definitions(rag-core-tests PRIVATE LRS_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+  set_target_properties(rag-core-tests PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/libexec")
+  add_test(NAME rag-owned-core-behavior COMMAND rag-core-tests)
+  if(LRS_BUILD_SPEC_CHECK)
+    add_test(NAME lrs-specification-traceability COMMAND lrs-spec-check)
+  endif()
+endif()
+
 if(LRS_BUILD_TESTS AND LRS_BUILD_COORDINATOR AND LRS_BUILD_MOBILE)
-  include(FetchContent)
-  FetchContent_Declare(Catch2
-    GIT_REPOSITORY https://github.com/catchorg/Catch2.git
-    GIT_TAG v3.8.1
-    GIT_SHALLOW TRUE)
-  FetchContent_MakeAvailable(Catch2)
+  add_executable(rag-integration-tests tests/rag_integration_tests.cpp)
+  target_link_libraries(rag-integration-tests PRIVATE lrs_bridge lrs_mobile rag::core)
+  target_include_directories(rag-integration-tests PRIVATE
+    third_party/llama.cpp/vendor)
+  target_compile_features(rag-integration-tests PRIVATE cxx_std_20)
+  set_target_properties(rag-integration-tests PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/libexec")
+  add_test(NAME rag-desktop-mobile-integration COMMAND rag-integration-tests)
+
+  find_package(Catch2 3 REQUIRED)
   add_executable(lrs-tests tests/tests.cpp)
   target_link_libraries(lrs-tests PRIVATE lrs_core lrs_mobile Catch2::Catch2WithMain)
   target_include_directories(lrs-tests PRIVATE
@@ -174,7 +193,4 @@ if(LRS_BUILD_TESTS AND LRS_BUILD_COORDINATOR AND LRS_BUILD_MOBILE)
   set_target_properties(lrs-tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/libexec")
   add_test(NAME lrs-unit-component-behavior COMMAND lrs-tests)
-  if(LRS_BUILD_SPEC_CHECK)
-    add_test(NAME lrs-specification-traceability COMMAND lrs-spec-check)
-  endif()
 endif()

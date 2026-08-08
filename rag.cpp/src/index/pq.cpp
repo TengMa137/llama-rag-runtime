@@ -15,20 +15,24 @@ namespace {
 
 float sub_dot(const float* a, const float* b, std::size_t n) {
     float s = 0.0f;
-    for (std::size_t i = 0; i < n; ++i) s += a[i] * b[i];
+    for (std::size_t i = 0; i < n; ++i)
+        s += a[i] * b[i];
     return s;
 }
 float sub_l2(const float* a, const float* b, std::size_t n) {
     float s = 0.0f;
-    for (std::size_t i = 0; i < n; ++i) { float d = a[i] - b[i]; s += d * d; }
+    for (std::size_t i = 0; i < n; ++i) {
+        float d = a[i] - b[i];
+        s += d * d;
+    }
     return s;
 }
 
 } // namespace
 
-Result<ProductQuantizer>
-ProductQuantizer::train(std::span<const Vector> data, PqConfig cfg) {
-    if (data.empty()) return unexpected(Error{Errc::invalid_argument, "pq: no training data"});
+Result<ProductQuantizer> ProductQuantizer::train(std::span<const Vector> data, PqConfig cfg) {
+    if (data.empty())
+        return unexpected(Error{Errc::invalid_argument, "pq: no training data"});
     const std::size_t dim = data[0].size();
     // Flatten once and delegate: one training implementation, not two.
     std::vector<float> flat(data.size() * dim);
@@ -40,10 +44,10 @@ ProductQuantizer::train(std::span<const Vector> data, PqConfig cfg) {
     return train_flat(flat, data.size(), dim, cfg);
 }
 
-Result<ProductQuantizer>
-ProductQuantizer::train_flat(std::span<const float> data, std::size_t n, std::size_t dim,
-                            PqConfig cfg) {
-    if (n == 0) return unexpected(Error{Errc::invalid_argument, "pq: no training data"});
+Result<ProductQuantizer> ProductQuantizer::train_flat(std::span<const float> data, std::size_t n,
+                                                      std::size_t dim, PqConfig cfg) {
+    if (n == 0)
+        return unexpected(Error{Errc::invalid_argument, "pq: no training data"});
     if (dim == 0 || cfg.m == 0 || dim % cfg.m != 0)
         return unexpected(Error{Errc::invalid_argument, "pq: dim must be divisible by m"});
     if (cfg.ksub == 0 || cfg.ksub > 256)
@@ -52,8 +56,8 @@ ProductQuantizer::train_flat(std::span<const float> data, std::size_t n, std::si
         return unexpected(Error{Errc::invalid_argument, "pq: short training arena"});
 
     ProductQuantizer pq;
-    pq.cfg_  = cfg;
-    pq.dim_  = dim;
+    pq.cfg_ = cfg;
+    pq.dim_ = dim;
     pq.dsub_ = dim / cfg.m;
     pq.centroids_.assign(cfg.m * cfg.ksub * pq.dsub_, 0.0f);
 
@@ -98,7 +102,8 @@ ProductQuantizer::train_flat(std::span<const float> data, std::size_t n, std::si
                 const float* prev = cents + (c - 1) * dsub;
                 for (std::size_t i = 0; i < n; ++i) {
                     float d = sub_l2(sub.data() + i * dsub, prev, dsub);
-                    if (d < d2[i]) d2[i] = d;
+                    if (d < d2[i])
+                        d2[i] = d;
                     total += d2[i];
                 }
                 std::size_t chosen = 0;
@@ -112,7 +117,10 @@ ProductQuantizer::train_flat(std::span<const float> data, std::size_t n, std::si
                     double target = u(rng), acc = 0.0;
                     for (std::size_t i = 0; i < n; ++i) {
                         acc += d2[i];
-                        if (acc >= target) { chosen = i; break; }
+                        if (acc >= target) {
+                            chosen = i;
+                            break;
+                        }
                         chosen = i;
                     }
                 }
@@ -121,7 +129,7 @@ ProductQuantizer::train_flat(std::span<const float> data, std::size_t n, std::si
         }
 
         std::vector<std::uint32_t> assign(n, 0);
-        std::vector<float>         acc(ksub * dsub);
+        std::vector<float> acc(ksub * dsub);
         std::vector<std::uint32_t> cnt(ksub);
         for (std::size_t it = 0; it < cfg.iters; ++it) {
             bool changed = false;
@@ -131,9 +139,15 @@ ProductQuantizer::train_flat(std::span<const float> data, std::size_t n, std::si
                 std::uint32_t bestc = 0;
                 for (std::size_t c = 0; c < ksub; ++c) {
                     float d = sub_l2(v, cents + c * dsub, dsub);
-                    if (d < bestd) { bestd = d; bestc = static_cast<std::uint32_t>(c); }
+                    if (d < bestd) {
+                        bestd = d;
+                        bestc = static_cast<std::uint32_t>(c);
+                    }
                 }
-                if (assign[i] != bestc) { assign[i] = bestc; changed = true; }
+                if (assign[i] != bestc) {
+                    assign[i] = bestc;
+                    changed = true;
+                }
             }
 
             std::fill(acc.begin(), acc.end(), 0.0f);
@@ -141,7 +155,8 @@ ProductQuantizer::train_flat(std::span<const float> data, std::size_t n, std::si
             for (std::size_t i = 0; i < n; ++i) {
                 const float* v = sub.data() + i * dsub;
                 float* a = acc.data() + assign[i] * dsub;
-                for (std::size_t d = 0; d < dsub; ++d) a[d] += v[d];
+                for (std::size_t d = 0; d < dsub; ++d)
+                    a[d] += v[d];
                 ++cnt[assign[i]];
             }
             for (std::size_t c = 0; c < ksub; ++c) {
@@ -156,14 +171,18 @@ ProductQuantizer::train_flat(std::span<const float> data, std::size_t n, std::si
                     std::size_t worst_i = 0;
                     for (std::size_t i = 0; i < n; ++i) {
                         float d = sub_l2(sub.data() + i * dsub, cents + assign[i] * dsub, dsub);
-                        if (d > worst) { worst = d; worst_i = i; }
+                        if (d > worst) {
+                            worst = d;
+                            worst_i = i;
+                        }
                     }
                     std::copy_n(sub.data() + worst_i * dsub, dsub, cents + c * dsub);
                     assign[worst_i] = static_cast<std::uint32_t>(c);
                     changed = true;
                 }
             }
-            if (!changed && it > 0) break;
+            if (!changed && it > 0)
+                break;
         }
     });
     return pq;
@@ -183,7 +202,10 @@ void ProductQuantizer::encode_into(std::span<const float> v,
         std::size_t bestc = 0;
         for (std::size_t c = 0; c < cfg_.ksub; ++c) {
             float d = sub_l2(vs, centroid(s, c), dsub_);
-            if (d < bestd) { bestd = d; bestc = c; }
+            if (d < bestd) {
+                bestd = d;
+                bestc = c;
+            }
         }
         out[s] = static_cast<std::uint8_t>(bestc);
     }
@@ -191,7 +213,8 @@ void ProductQuantizer::encode_into(std::span<const float> v,
 
 void ProductQuantizer::encode_flat(std::span<const float> data, std::size_t n,
                                    std::span<std::uint8_t> out) const {
-    if (dim_ == 0 || out.size() < n * cfg_.m) return;
+    if (dim_ == 0 || out.size() < n * cfg_.m)
+        return;
     // Encoding is n independent nearest-centroid searches (m*ksub*dsub flops
     // each) writing to disjoint output rows — embarrassingly parallel.
     util::parallel_for(n, [&](std::size_t i) {
@@ -248,7 +271,7 @@ std::vector<Hit> ProductQuantizer::search(std::span<const float> query, std::siz
     }
     std::size_t keep = std::min(hits.size(), k);
     std::partial_sort(hits.begin(), hits.begin() + keep, hits.end(),
-        [](const Hit& a, const Hit& b) { return a.score.get() > b.score.get(); });
+                      [](const Hit& a, const Hit& b) { return a.score.get() > b.score.get(); });
     hits.resize(keep);
     return hits;
 }
@@ -261,36 +284,61 @@ std::string ProductQuantizer::serialize() const {
     w.u<std::uint32_t>((std::uint32_t)dim_);
     w.u<std::uint32_t>((std::uint32_t)dsub_);
     w.u<std::uint32_t>((std::uint32_t)centroids_.size());
-    for (float f : centroids_) w.u<float>(f);
+    for (float f : centroids_)
+        w.u<float>(f);
     w.u<std::uint32_t>((std::uint32_t)ids_.size());
-    for (auto id : ids_) w.u<std::uint32_t>(id);
+    for (auto id : ids_)
+        w.u<std::uint32_t>(id);
     w.u<std::uint32_t>((std::uint32_t)codes_.size());
     w.bytes(std::string_view(reinterpret_cast<const char*>(codes_.data()), codes_.size()));
     return std::move(w.data());
 }
 
 Result<ProductQuantizer> ProductQuantizer::deserialize(std::string_view blob) {
-    store::Reader r(blob);
-    std::string_view magic;
-    if (!r.bytes(4, magic) || magic != "2PQ1")
-        return unexpected(Error{Errc::corrupt_index, "pq: bad magic"});
-    ProductQuantizer pq;
-    std::uint32_t m, ksub, dim, dsub, ncent;
-    if (!r.u(m) || !r.u(ksub) || !r.u(dim) || !r.u(dsub) || !r.u(ncent))
-        return unexpected(Error{Errc::corrupt_index, "pq: header"});
-    pq.cfg_.m = m; pq.cfg_.ksub = ksub; pq.dim_ = dim; pq.dsub_ = dsub;
-    pq.centroids_.resize(ncent);
-    for (auto& f : pq.centroids_) if (!r.u(f)) return unexpected(Error{Errc::corrupt_index, "pq: centroids"});
-    std::uint32_t nid;
-    if (!r.u(nid)) return unexpected(Error{Errc::corrupt_index, "pq: ids"});
-    pq.ids_.resize(nid);
-    for (auto& id : pq.ids_) if (!r.u(id)) return unexpected(Error{Errc::corrupt_index, "pq: id"});
-    std::uint32_t nc;
-    if (!r.u(nc)) return unexpected(Error{Errc::corrupt_index, "pq: codes"});
-    std::string_view cv;
-    if (!r.bytes(nc, cv)) return unexpected(Error{Errc::corrupt_index, "pq: code bytes"});
-    pq.codes_.assign(cv.begin(), cv.end());
-    return pq;
+    try {
+        store::Reader r(blob);
+        std::string_view magic;
+        if (!r.bytes(4, magic) || magic != "2PQ1")
+            return unexpected(Error{Errc::corrupt_index, "pq: bad magic"});
+        ProductQuantizer pq;
+        std::uint32_t m, ksub, dim, dsub, ncent;
+        if (!r.u(m) || !r.u(ksub) || !r.u(dim) || !r.u(dsub) || !r.u(ncent) || m == 0 ||
+            ksub == 0 || ksub > 256 || dim == 0 || dim > store::kMaxVectorDimension || dsub == 0 ||
+            static_cast<std::uint64_t>(m) * dsub != dim ||
+            static_cast<std::uint64_t>(m) * ksub * dsub != ncent ||
+            ncent > r.remaining() / sizeof(float))
+            return unexpected(Error{Errc::corrupt_index, "pq: header"});
+        pq.cfg_.m = m;
+        pq.cfg_.ksub = ksub;
+        pq.dim_ = dim;
+        pq.dsub_ = dsub;
+        pq.centroids_.resize(ncent);
+        for (auto& f : pq.centroids_)
+            if (!r.u(f) || !std::isfinite(f))
+                return unexpected(Error{Errc::corrupt_index, "pq: centroids"});
+        std::uint32_t nid;
+        if (!r.u(nid) || nid > store::kMaxGraphNodes || nid > r.remaining() / sizeof(std::uint32_t))
+            return unexpected(Error{Errc::corrupt_index, "pq: ids"});
+        pq.ids_.resize(nid);
+        for (auto& id : pq.ids_)
+            if (!r.u(id))
+                return unexpected(Error{Errc::corrupt_index, "pq: id"});
+        std::uint32_t nc;
+        if (!r.u(nc) || nc != static_cast<std::uint64_t>(nid) * m || nc > r.remaining())
+            return unexpected(Error{Errc::corrupt_index, "pq: codes"});
+        std::string_view cv;
+        if (!r.bytes(nc, cv))
+            return unexpected(Error{Errc::corrupt_index, "pq: code bytes"});
+        pq.codes_.assign(cv.begin(), cv.end());
+        if (r.remaining() != 0)
+            return unexpected(Error{Errc::corrupt_index, "pq: trailing data"});
+        return pq;
+    } catch (const std::exception& error) {
+        return unexpected(
+            Error{Errc::corrupt_index, std::string("pq parse failed: ") + error.what()});
+    } catch (...) {
+        return unexpected(Error{Errc::corrupt_index, "pq parse failed"});
+    }
 }
 
 } // namespace rag::index

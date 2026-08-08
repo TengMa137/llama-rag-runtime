@@ -140,13 +140,14 @@ std::string normalize_input(std::string_view body, const ChunkOptions& opts, boo
 
 std::string chunking_fingerprint(const ChunkOptions& o) {
     std::ostringstream s;
-    s << "rag.cpp-hierarchical-v1|" << o.max_lines << '|' << o.max_chars << '|' << o.overlap_lines
-      << '|' << o.heading_context << '|' << o.policy.model_identity << '|'
-      << o.policy.tokenizer_identity << '|' << o.policy.dimension << '|' << o.policy.target_tokens
-      << '|' << o.policy.max_tokens << '|' << o.policy.overlap_tokens << '|'
-      << o.policy.reserved_tokens << '|' << o.policy.document_prefix << '|' << o.policy.query_prefix
-      << '|' << static_cast<int>(o.policy.counting_mode) << '|'
-      << static_cast<int>(o.policy.invalid_utf8);
+    // Only fields that can change structural boundaries belong here. Model
+    // identity, vector dimension, and query prefix are validated separately by
+    // coordinators and must not make desktop/mobile chunk geometry diverge.
+    s << "rag.cpp-structural-v2|" << o.max_lines << '|' << o.max_chars << '|' << o.overlap_lines
+      << '|' << o.heading_context << '|' << o.policy.tokenizer_identity << '|'
+      << o.policy.target_tokens << '|' << o.policy.max_tokens << '|' << o.policy.overlap_tokens
+      << '|' << o.policy.reserved_tokens << '|' << o.policy.document_prefix << '|'
+      << static_cast<int>(o.policy.counting_mode) << '|' << static_cast<int>(o.policy.invalid_utf8);
     return s.str();
 }
 

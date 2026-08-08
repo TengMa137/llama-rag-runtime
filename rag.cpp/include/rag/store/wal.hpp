@@ -47,8 +47,8 @@
 #include <string_view>
 #include <vector>
 
-#include "rag/core/types.hpp"
 #include "rag/core/document.hpp"
+#include "rag/core/types.hpp"
 
 namespace rag::store {
 
@@ -68,17 +68,17 @@ enum class SyncMode {
 
 // One logical mutation.
 enum class WalOp : std::uint8_t {
-    add_document    = 1,   // uri, title, text, meta
-    remove_document = 2,   // doc id
+    add_document = 1,    // uri, title, text, meta
+    remove_document = 2, // doc id
 };
 
 struct WalRecord {
-    WalOp       op = WalOp::add_document;
+    WalOp op = WalOp::add_document;
     std::string uri;
     std::string title;
     std::string text;
-    Metadata    meta;
-    std::uint32_t doc_id = 0;      // remove_document only
+    Metadata meta;
+    std::uint32_t doc_id = 0; // remove_document only
 };
 
 // An append-only log of logical mutations.
@@ -87,7 +87,7 @@ struct WalRecord {
 // which is also what makes the log order match the order the mutations were
 // applied in memory.
 class Wal {
-public:
+  public:
     Wal() = default;
     ~Wal();
     Wal(const Wal&) = delete;
@@ -122,10 +122,10 @@ public:
 
     void close() noexcept;
 
-private:
-    int           fd_    = -1;
-    std::string   path_;
-    SyncMode      mode_  = SyncMode::flush;
+  private:
+    int fd_ = -1;
+    std::string path_;
+    SyncMode mode_ = SyncMode::flush;
     std::uint64_t bytes_ = 0;
 
     [[nodiscard]] Result<void> sync_now() noexcept;

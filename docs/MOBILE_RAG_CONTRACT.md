@@ -38,7 +38,7 @@ Flutter Gemma / LiteRT
 NativeRagIndex (Dart FFI facade)
               |
               v
-libragcpp_mobile.so
+librag_mobile.so
   chunks, indexes, ranks, returns sources, persists .ragdb
 
 mobileAgent's existing Flutter LLM engine

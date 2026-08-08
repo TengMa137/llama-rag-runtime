@@ -1,0 +1,41 @@
+# Supported retrieval-core API inventory after the owned-core surface reduction.
+# Binary C symbols retained as unavailable stubs are marked legacy.
+
+CMake targets:
+rag::core
+
+Application-facing C++:
+rag::Engine
+rag::index::Corpus
+rag::index::CorpusConfig
+rag::pipeline::Pipeline
+rag::retrieval::SearchOptions
+rag::retrieval::Diagnostics
+rag::text::ChunkOptions
+rag::text::chunking_fingerprint
+
+C ABI retained in the core header:
+rag_version
+rag_last_error
+rag_embedder_hash
+rag_engine_new
+rag_engine_create
+rag_engine_free
+rag_engine_set_embedder
+rag_engine_add
+rag_engine_build
+rag_engine_search
+rag_results_*
+rag_engine_save
+rag_engine_load
+rag_string_free
+
+Legacy binary symbols retained but removed from the public header:
+rag_embedder_ollama
+rag_embedder_openai
+rag_embedder_llamacpp
+rag_reranker_tei
+rag_reranker_cohere
+rag_reranker_free
+rag_engine_set_reranker
+rag_engine_add_directory

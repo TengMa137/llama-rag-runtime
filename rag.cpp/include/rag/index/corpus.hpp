@@ -27,8 +27,6 @@
 #include "rag/store/container.hpp"
 #include "rag/store/wal.hpp"
 #include "rag/text/chunker.hpp"
-#include "rag/text/contextual.hpp"
-#include "rag/text/semantic_chunker.hpp"
 
 namespace rag::index {
 
@@ -41,47 +39,6 @@ struct CorpusConfig {
     // cosine is faster and exact.
     std::size_t hnsw_threshold = 2000;
     std::size_t embed_batch = 32;
-
-    // How documents are split. `fixed` is the structural chunker (headings +
-    // token windows): fast, deterministic, and the right default. `semantic`
-    // places boundaries where the topic actually drifts, which produces more
-    // self-contained chunks on prose at the cost of a similarity pass over
-    // adjacent sentences.
-    //
-    // `semantic` uses the embedder when one is attached and falls back to
-    // lexical (Jaccard) drift otherwise, so it never becomes a hard dependency
-    // on an embedding backend.
-    enum class Chunking { fixed, semantic };
-    Chunking chunking = Chunking::fixed;
-    text::SemanticChunkOptions semantic{};
-
-    // Contextual Retrieval (Anthropic 2024). Before indexing, prepend to each
-    // chunk a short blurb SITUATING it in its source document, so that a
-    // fragment which says "revenue grew 3%" still carries the name of the
-    // company it is about. Both the BM25 postings and the dense vector are
-    // built from indexed_text(), so turning this on changes what BOTH halves
-    // of the hybrid see — which is the whole point.
-    //
-    // Off by default because it is not free. Measured by
-    // bench/contextual_bench.cpp on its own synthetic corpus (2000 documents
-    // that name their subject ONCE, in the title, 18k chunks at max_lines=4,
-    // this machine): ingest+build 22.7 ms -> 67.7 ms (2.98x) and indexed text
-    // 1.95x, against chunk-level recall@5 0.0026 -> 0.9998.
-    //
-    // That recall figure is a CEILING, not a promise. It is that large only
-    // because on that corpus the subject is unreachable from any chunk but the
-    // title chunk, which is the paper's premise taken to its limit. On a corpus
-    // whose chunks already repeat their subject there is nothing to situate,
-    // and the 2.98x is pure cost. Measure before enabling this.
-    //
-    // (Document-level recall on the same corpus is 1.0 in BOTH arms — the
-    // subject token is unique, so the document is always found via its title
-    // chunk. A doc-level metric cannot see this feature at all.)
-    //
-    // This lives in the INGEST config rather than in a pipeline stage on
-    // purpose: the paper's method rewrites what is indexed, so it has to run
-    // before the indexes are built. A query-time stage cannot reproduce it.
-    bool contextual = false;
 };
 
 // Predicate over a chunk's document metadata for filtered retrieval.
@@ -114,29 +71,14 @@ class Corpus {
     [[nodiscard]] bool has_embedder() const noexcept { return embedder_.has_value(); }
     [[nodiscard]] std::size_t hnsw_threshold() const noexcept { return cfg_.hnsw_threshold; }
     [[nodiscard]] const CorpusConfig& config() const noexcept { return cfg_; }
-    // Read-only view of the attached embedder (its dimension/identity/embed),
-    // or nullptr when none is set. Lets front-ends (e.g. the RCP server) both
-    // advertise the dense capability and answer raw `embed` requests without
-    // reaching into corpus internals.
+    // Read-only view of the attached embedder, or nullptr when none is set.
     [[nodiscard]] const dense::AnyEmbedder* embedder() const noexcept {
         return embedder_ ? &*embedder_ : nullptr;
     }
 
     // Embed arbitrary text with the attached embedder (unit-normalized, same as
-    // indexed chunks). Fails with Errc::unavailable if no embedder is set. Used
-    // by RAPTOR / HyDE / late-interaction which embed synthetic text.
+    // indexed chunks). Fails with Errc::unavailable if no embedder is set.
     [[nodiscard]] Result<Vector> embed_text(const std::string& text) const;
-
-    // Attach an LLM to write the situating context (Anthropic's method as
-    // published). Only consulted when cfg.contextual is true; with contextual
-    // on and no contextualizer set, ingest uses the deterministic extractive
-    // fallback, which needs no model and never fails. A contextualizer that
-    // returns an error for one chunk falls back for THAT chunk rather than
-    // failing the ingest — a flaky model must not be able to reject a document.
-    void set_contextualizer(text::Contextualizer c) { contextualizer_ = std::move(c); }
-    [[nodiscard]] bool has_contextualizer() const noexcept {
-        return static_cast<bool>(contextualizer_);
-    }
 
     // Ingest a document: chunk it, assign ids, index lexically, and (if an
     // embedder is set) embed its chunks. Returns the assigned DocId.
@@ -151,7 +93,7 @@ class Corpus {
     //   add_document(u, ...);
     // which takes the lock three separate times. Two threads upserting the same
     // uri can then both observe "not present" and both insert, producing the
-    // duplicate that RCP §7.10 explicitly forbids. Holding the write lock across
+    // duplicate that URI identity forbids. Holding the write lock across
     // the whole read-modify-write is the only way to make it a real upsert.
     Result<DocId> upsert_document(std::string uri, std::string text, Metadata meta = {},
                                   std::string title = {});
@@ -188,9 +130,7 @@ class Corpus {
     // which has q times the arithmetic intensity of q separate scans. A single
     // scan is bandwidth-bound (measured ~47 GB/s on an M1, f32 and f16 alike),
     // so no amount of kernel tuning helps it; the batch is where a GPU can
-    // actually win. Callers that have several queries in hand — RAG-Fusion /
-    // multi-query, HyDE with several hypotheticals, offline evaluation — should
-    // use this rather than looping.
+    // actually win. Batched evaluation should use this rather than looping.
     //
     // Routing is automatic and conservative: this uses the GPU only when there
     // is no HNSW graph to walk (a graph walk is pointer-chasing and must never
@@ -205,8 +145,7 @@ class Corpus {
     [[nodiscard]] const Chunk* chunk(ChunkId id) const;
     [[nodiscard]] const Document* document(DocId id) const;
     // Look up a live (non-tombstoned) document by its stable external uri, or
-    // nullopt if none. Enables upsert semantics (RCP index/add §7.10 mandates an
-    // explicit id is an upsert, not a duplicate).
+    // nullopt if none. Enables atomic upsert semantics for a URI.
     [[nodiscard]] std::optional<DocId> find_by_uri(std::string_view uri) const;
     [[nodiscard]] SearchResult resolve(const Hit& h) const;
     [[nodiscard]] std::size_t chunk_count() const noexcept {
@@ -223,7 +162,7 @@ class Corpus {
     // chunks() const` — was a data race by construction: it took a shared lock,
     // released it at the return statement, and handed the caller a reference
     // into storage a concurrent add_document() may reallocate. Every bulk
-    // consumer (graph, raptor, splade) iterates that vector for as long as it
+    // consumer iterates that vector for as long as it
     // takes to build an index over the whole corpus, which is exactly the
     // window in which a served corpus accepts a write.
     //
@@ -285,7 +224,7 @@ class Corpus {
     //
     // The log is the SERVER's tool, not the library's default: a batch indexer
     // that ends in one save() wants nothing to do with it, while a process
-    // accepting writes over RCP cannot honestly acknowledge one without it.
+    // accepting acknowledged writes cannot honestly do so without it.
     // Measured on this machine: acknowledging an index/add by rewriting the
     // snapshot costs 25 ms at 20k documents and 69.7 ms at 50k and grows
     // forever; appending + fsync costs 0.04 ms and is flat.
@@ -309,10 +248,6 @@ class Corpus {
   private:
     CorpusConfig cfg_{};
     std::optional<dense::AnyEmbedder> embedder_;
-    // Optional LLM seam for Contextual Retrieval; empty means "use the
-    // deterministic extractive context". Not serialized — it is a backend
-    // binding like embedder_, and the CONTEXT it produced is what persists.
-    text::Contextualizer contextualizer_;
     std::vector<Document> docs_;
     std::vector<Chunk> chunks_;
     lexical::Bm25Index bm25_{cfg_.bm25, cfg_.tokenize};

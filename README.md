@@ -11,9 +11,10 @@ The desktop runtime exposes an OpenAI-compatible chat-completions API, so an exi
 
 ## Prerequisites and build
 
-You need CMake 3.24 or newer, a C++20 compiler, Git, and enough disk space for
-the GGUF embedding and generation models. macOS is the currently verified
-desktop target. Android additionally requires NDK 28.2 or newer.
+You need CMake 3.24 or newer, a C++20 compiler, Git, Catch2 3 for desktop test
+builds (`brew install catch2` on macOS), and enough disk space for the GGUF
+embedding and generation models. macOS is the currently verified desktop
+target. Android additionally requires NDK 28.2 or newer.
 
 Clone the repository, initialize the remaining llama.cpp submodule, configure,
 build, and test on macOS:
@@ -328,7 +329,7 @@ Streaming RAG chat uses normal OpenAI `chat.completion.chunk` events and termina
 
 ## Agentic RAG status
 
-Agentic RAG is not implemented in the coordinator today. The current flow is one bounded pass: retrieve once, build one grounded prompt, and make one generation request. Research sources retained for provenance include components such as HyDE, CRAG, Self-RAG gates, and RAPTOR, but the explicit rag.cpp runtime target does not compile or call them.
+Agentic RAG is not implemented in the coordinator today. The current flow is one bounded pass: retrieve once, build one grounded prompt, and make one generation request. Research retrieval systems are outside the owned rag.cpp core; future agent behavior belongs in the parent runtime.
 
 `docs/llama-rag-server-spec.md` describes bounded agentic retrieval as a future phase, not current behavior. There are no tool-selection loops, iterative query rewriting, retrieval grading/retry, web fallback, or `/v1/agents/*` endpoints yet. Applications can build their own agent loop by calling `/v1/rag/search` and deciding when to retrieve or generate.
 
@@ -358,7 +359,7 @@ cmake --build --preset android-arm64
 Output:
 
 ```text
-build/android-arm64/lib/libragcpp_mobile.so
+build/android-arm64/lib/librag_mobile.so
 ```
 
 See `docs/MOBILE_RAG_CONTRACT.md` for the C ABI lifecycle and embedding contract. Use `tools/sync_mobile_agent_android.sh` to copy a built library into the adjacent `mobileAgent` checkout.

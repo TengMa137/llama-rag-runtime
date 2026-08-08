@@ -24,7 +24,7 @@ lrs::Config test_config(const std::filesystem::path& database) {
 }
 
 std::string
-document(std::string content = "# Local RAG\nThe index is persisted in a rag-cpp database.") {
+document(std::string content = "# Local RAG\nThe index is persisted in a local retrieval database.") {
     return nlohmann::json{{"id", "demo/getting-started"},
                           {"content_type", "text/markdown"},
                           {"title", "Getting started"},

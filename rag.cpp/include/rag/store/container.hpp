@@ -18,12 +18,16 @@
 namespace rag::store {
 
 class Container {
-public:
+  public:
     // Add a section payload under a tag. Later duplicates overwrite.
-    void put(Tag tag, std::string payload) { sections_[static_cast<std::uint32_t>(tag)] = std::move(payload); }
+    void put(Tag tag, std::string payload) {
+        sections_[static_cast<std::uint32_t>(tag)] = std::move(payload);
+    }
     void put_raw(std::uint32_t tag, std::string payload) { sections_[tag] = std::move(payload); }
 
-    [[nodiscard]] bool has(Tag tag) const { return sections_.count(static_cast<std::uint32_t>(tag)) != 0; }
+    [[nodiscard]] bool has(Tag tag) const {
+        return sections_.count(static_cast<std::uint32_t>(tag)) != 0;
+    }
     [[nodiscard]] const std::string* get(Tag tag) const {
         auto it = sections_.find(static_cast<std::uint32_t>(tag));
         return it == sections_.end() ? nullptr : &it->second;
@@ -50,7 +54,7 @@ public:
     static void sweep_orphan_temps(const std::string& path);
     [[nodiscard]] static Result<Container> read_file(const std::string& path);
 
-private:
+  private:
     std::map<std::uint32_t, std::string> sections_;
     std::uint32_t flags_ = 0;
     std::uint16_t major_ = kFormatMajor;

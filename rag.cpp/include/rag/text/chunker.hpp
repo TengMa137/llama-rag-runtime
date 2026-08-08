@@ -1,11 +1,11 @@
 #pragma once
-// rag/text/chunker.hpp — semantic, line-aligned document chunking.
+// rag/text/chunker.hpp — deterministic, line-aware structural chunking.
 //
 // Splits a document into bounded chunks that (a) never break mid-line, (b)
-// prefer to break on blank lines / markdown headings (semantic boundaries),
+// prefer to break on blank lines / markdown headings (structural boundaries),
 // (c) overlap a few trailing lines so a fact straddling a boundary survives,
 // and (d) carry a `context` breadcrumb (the enclosing markdown heading chain)
-// for contextual retrieval.
+// as structural retrieval context.
 
 #include <functional>
 #include <string>
