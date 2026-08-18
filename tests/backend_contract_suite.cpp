@@ -99,6 +99,23 @@ rag::Result<void> run_candidate_backend_contract(rag::backend::CandidateBackend&
     if (auto valid = verify(lexical->size() == 1, "lexical metadata filter leaked results"); !valid)
         return valid;
 
+    const rag::backend::MetadataFilter either_tenant(
+        rag::backend::MetadataFilter::Requirements{{"tenant", {"south", "north", "north"}}});
+    auto lexical_either = backend.lexical_candidates({"alpha", 10, either_tenant});
+    if (!lexical_either)
+        return rag::unexpected(lexical_either.error());
+    if (auto valid =
+            verify(lexical_either->size() == 2, "lexical any-of metadata filter is incomplete");
+        !valid)
+        return valid;
+    const rag::backend::MetadataFilter empty_values(
+        rag::backend::MetadataFilter::Requirements{{"tenant", {}}});
+    auto lexical_empty = backend.lexical_candidates({"alpha", 10, empty_values});
+    if (!lexical_empty)
+        return rag::unexpected(lexical_empty.error());
+    if (auto valid = verify(lexical_empty->empty(), "empty allowed set matched results"); !valid)
+        return valid;
+
     auto query = embedder.embed_one("alpha");
     if (!query)
         return rag::unexpected(query.error());

@@ -224,6 +224,7 @@ SCENARIO("document ingestion persists and reopens", "[component][req:LRS-ING-001
             service.search(R"({"query":"persisted database","mode":"hybrid","top_k":8})", status));
         REQUIRE(status == 200);
         REQUIRE_FALSE(result.at("results").empty());
+        REQUIRE_FALSE(result.contains("filter_ack"));
     }
     std::filesystem::remove_all(root);
 }
@@ -399,7 +400,7 @@ SCENARIO("metadata filters are exact AND predicates in every retrieval mode",
                                            {"title", "Terminal Setup"},
                                            {"content", "shared permission marker terminal setup"},
                                            {"metadata",
-                                            {{"audience", "all"},
+                                            {{"sensitivity", "general"},
                                              {"source", "notion"},
                                              {"url", "https://notion.example/setup"},
                                              {"lastSyncedAt", "2026-08-10T09:00:00Z"}}}}
@@ -408,7 +409,7 @@ SCENARIO("metadata filters are exact AND predicates in every retrieval mode",
             nlohmann::json{{"id", "private/setup"},
                            {"title", "Private Setup"},
                            {"content", "shared permission marker terminal setup"},
-                           {"metadata", {{"audience", "admins"}, {"source", "notion"}}}}
+                           {"metadata", {{"sensitivity", "restricted"}, {"source", "notion"}}}}
                 .dump();
         service.ingest(notion, status);
         REQUIRE(status == 201);
@@ -417,47 +418,103 @@ SCENARIO("metadata filters are exact AND predicates in every retrieval mode",
 
         for (const std::string mode : {"lexical", "dense", "hybrid"}) {
             const auto result = nlohmann::json::parse(service.search(
-                nlohmann::json{{"query", "permission marker"},
-                               {"mode", mode},
-                               {"top_k", 8},
-                               {"filter", {{"audience", "all"}, {"source", "notion"}}}}
+                nlohmann::json{
+                    {"query", "permission marker"},
+                    {"mode", mode},
+                    {"top_k", 8},
+                    {"filter",
+                     {{"sensitivity", nlohmann::json::array({"restricted", "general", "general"})},
+                      {"source", "notion"}}}}
                     .dump(),
                 status));
             REQUIRE(status == 200);
             REQUIRE_FALSE(result.at("results").empty());
             for (const auto& hit : result.at("results")) {
-                REQUIRE(hit.at("document_id") == "notion/setup");
-                REQUIRE(hit.at("title") == "Terminal Setup");
-                REQUIRE(hit.at("metadata").at("audience") == "all");
+                REQUIRE(hit.at("metadata").at("sensitivity").is_string());
                 REQUIRE(hit.at("metadata").at("source") == "notion");
                 REQUIRE(hit.at("score").is_number());
             }
+            REQUIRE(result.at("results").size() == 2);
+            REQUIRE(result.at("filter_ack").at("contract") == "metadata-any-of-v1");
+            REQUIRE(result.at("filter_ack").at("applied").at("sensitivity") ==
+                    nlohmann::json::array({"general", "restricted"}));
+            REQUIRE(result.at("filter_ack").at("applied").at("source") ==
+                    nlohmann::json::array({"notion"}));
+
+            for (const std::string sensitivity : {"general", "restricted"}) {
+                const auto singleton = nlohmann::json::parse(
+                    service.search(nlohmann::json{{"query", "permission marker"},
+                                                  {"mode", mode},
+                                                  {"filter", {{"sensitivity", sensitivity}}}}
+                                       .dump(),
+                                   status));
+                REQUIRE(status == 200);
+                REQUIRE(singleton.at("results").size() == 1);
+                REQUIRE(singleton.at("results").front().at("metadata").at("sensitivity") ==
+                        sensitivity);
+            }
         }
 
-        const auto excluded = nlohmann::json::parse(
-            service.search(nlohmann::json{{"query", "permission marker"},
-                                          {"mode", "hybrid"},
-                                          {"filter", {{"audience", "all"}, {"source", "github"}}}}
-                               .dump(),
-                           status));
+        const auto excluded = nlohmann::json::parse(service.search(
+            nlohmann::json{{"query", "permission marker"},
+                           {"mode", "hybrid"},
+                           {"filter", {{"sensitivity", "general"}, {"source", "github"}}}}
+                .dump(),
+            status));
         REQUIRE(status == 200);
         REQUIRE(excluded.at("results").empty());
 
-        service.search(nlohmann::json{{"query", "permission marker"},
-                                      {"filter", {{"audience", nlohmann::json::array({"all"})}}}}
-                           .dump(),
-                       status);
+        const auto empty = nlohmann::json::parse(service.search(
+            nlohmann::json{{"query", "permission marker"}, {"filter", nlohmann::json::object()}}
+                .dump(),
+            status));
+        REQUIRE(status == 200);
+        REQUIRE(empty.at("results").empty());
+        REQUIRE(empty.at("filter_ack").at("applied") == nlohmann::json::object());
+
+        const auto empty_values = nlohmann::json::parse(
+            service.search(nlohmann::json{{"query", "permission marker"},
+                                          {"filter", {{"sensitivity", nlohmann::json::array()}}}}
+                               .dump(),
+                           status));
+        REQUIRE(status == 200);
+        REQUIRE(empty_values.at("results").empty());
+        REQUIRE(empty_values.at("filter_ack").at("applied").at("sensitivity") ==
+                nlohmann::json::array());
+
+        service.search(
+            nlohmann::json{{"query", "permission marker"},
+                           {"filter", {{"sensitivity", nlohmann::json::array({"general", 7})}}}}
+                .dump(),
+            status);
+        REQUIRE(status == 400);
+        service.search(
+            nlohmann::json{{"query", "permission marker"}, {"filter", {{"sensitivity", 7}}}}.dump(),
+            status);
+        REQUIRE(status == 400);
+        nlohmann::json oversized = {{"query", "permission marker"},
+                                    {"filter", {{"sensitivity", nullptr}}}};
+        oversized["filter"]["sensitivity"] = std::vector<std::string>(257, "x");
+        service.search(oversized.dump(), status);
+        REQUIRE(status == 400);
+        nlohmann::json too_many_total = {{"query", "permission marker"},
+                                         {"filter", nlohmann::json::object()}};
+        for (std::size_t key = 0; key < 5; ++key)
+            too_many_total["filter"]["key" + std::to_string(key)] =
+                std::vector<std::string>(205, "x");
+        service.search(too_many_total.dump(), status);
         REQUIRE(status == 400);
     }
     {
         lrs::Service reopened(test_config(database));
         reopened.initialize();
         int status = 0;
-        const auto result = nlohmann::json::parse(reopened.search(
-            nlohmann::json{
-                {"query", "terminal setup"}, {"mode", "hybrid"}, {"filter", {{"audience", "all"}}}}
-                .dump(),
-            status));
+        const auto result = nlohmann::json::parse(
+            reopened.search(nlohmann::json{{"query", "terminal setup"},
+                                           {"mode", "hybrid"},
+                                           {"filter", {{"sensitivity", "general"}}}}
+                                .dump(),
+                            status));
         REQUIRE(status == 200);
         REQUIRE_FALSE(result.at("results").empty());
         REQUIRE(result.at("results").front().at("metadata").at("source") == "notion");
@@ -531,11 +588,13 @@ SCENARIO("query emits sources before generation", "[behavior][req:LRS-SSE-002]")
     lrs::Service service(config);
     service.initialize();
     int status = 0;
-    service.ingest(document(), status);
+    auto filtered_document = nlohmann::json::parse(document());
+    filtered_document["metadata"] = {{"sensitivity", "general"}};
+    service.ingest(filtered_document.dump(), status);
     std::string stream;
     std::string error;
     const bool completed = service.query(
-        R"({"messages":[{"role":"user","content":"How is it persisted?"}],"stream":true})",
+        R"({"messages":[{"role":"user","content":"How is it persisted?"}],"retrieval":{"filter":{"sensitivity":["general"]}},"stream":true})",
         [&](const std::string& event) {
             stream += event;
             return true;
@@ -549,9 +608,13 @@ SCENARIO("query emits sources before generation", "[behavior][req:LRS-SSE-002]")
     REQUIRE(started < sources);
     REQUIRE(sources < delta);
     REQUIRE(delta < done);
+    REQUIRE(
+        stream.find(
+            R"("filter_ack":{"applied":{"sensitivity":["general"]},"contract":"metadata-any-of-v1"})") !=
+        std::string::npos);
 
     const std::string openai_request =
-        R"({"model":"qwen-generation","messages":[{"role":"user","content":"How is it persisted?"}],"max_tokens":64,"stream":false})";
+        R"({"model":"qwen-generation","messages":[{"role":"user","content":"How is it persisted?"}],"max_tokens":64,"rag":{"filter":{"sensitivity":"general"}},"stream":false})";
     const auto completion = nlohmann::json::parse(service.chat_completions(openai_request, status));
     REQUIRE(status == 200);
     REQUIRE(completion.at("object") == "chat.completion");
@@ -559,16 +622,23 @@ SCENARIO("query emits sources before generation", "[behavior][req:LRS-SSE-002]")
     REQUIRE(completion.at("choices").at(0).at("message").at("role") == "assistant");
     REQUIRE(completion.at("choices").at(0).at("message").at("content") == "answer [1]");
     REQUIRE_FALSE(completion.at("rag_sources").empty());
+    REQUIRE(completion.at("rag_filter_ack").at("contract") == "metadata-any-of-v1");
+    REQUIRE(completion.at("rag_filter_ack").at("applied").at("sensitivity") ==
+            nlohmann::json::array({"general"}));
 
     std::string openai_stream;
     REQUIRE(service.chat_completions_stream(
-        R"({"model":"qwen-generation","messages":[{"role":"user","content":"How is it persisted?"}],"max_tokens":64,"stream":true})",
+        R"({"model":"qwen-generation","messages":[{"role":"user","content":"How is it persisted?"}],"max_tokens":64,"rag":{"filter":{"sensitivity":["general"]}},"stream":true})",
         [&](const std::string& event) {
             openai_stream += event;
             return true;
         },
         error));
     REQUIRE(openai_stream.find(R"("object":"chat.completion.chunk")") != std::string::npos);
+    REQUIRE(
+        openai_stream.find(
+            R"("rag_filter_ack":{"applied":{"sensitivity":["general"]},"contract":"metadata-any-of-v1"})") !=
+        std::string::npos);
     REQUIRE(openai_stream.find(R"("content":"answer [1]")") != std::string::npos);
     REQUIRE(openai_stream.find("data: [DONE]\n\n") != std::string::npos);
 

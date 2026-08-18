@@ -96,7 +96,9 @@ rag::Result<nlohmann::json> run_qrels(const std::string& path) {
                 request.mode = rag::backend::SearchMode::hybrid;
                 request.top_k = top_k;
                 request.candidate_pool = candidate_pool(profile, top_k);
-                request.filter.required = query.value("filter", rag::Metadata{});
+                if (query.contains("filter"))
+                    request.filter =
+                        rag::backend::MetadataFilter(query.at("filter").get<rag::Metadata>());
                 request.profile = profile;
                 const auto query_started = std::chrono::steady_clock::now();
                 auto results = rag::retrieval::search(backend, request);

@@ -231,6 +231,19 @@ void test_backend_contract_types_and_exact_dense_index() {
     CHECK(!filter.matches({{"tenant", "north"}, {"visibility", "private"}}));
     CHECK(!filter.matches({{"tenant", "north"}}));
 
+    const rag::backend::MetadataFilter any_tenant(rag::backend::MetadataFilter::Requirements{
+        {"tenant", {"south", "north", "north"}}, {"visibility", {"team"}}});
+    CHECK(any_tenant.required.at("tenant") == std::vector<std::string>({"north", "south"}));
+    CHECK(any_tenant.matches({{"tenant", "south"}, {"visibility", "team"}}));
+    CHECK(!any_tenant.matches({{"tenant", "south"}, {"visibility", "private"}}));
+    CHECK(!any_tenant.matches({{"visibility", "team"}}));
+    const rag::backend::MetadataFilter empty_allowed(
+        rag::backend::MetadataFilter::Requirements{{"tenant", {}}});
+    CHECK(!empty_allowed.matches({{"tenant", "north"}}));
+    const rag::backend::MetadataFilter explicit_empty(rag::backend::MetadataFilter::Requirements{});
+    CHECK(!explicit_empty.matches({{"tenant", "north"}}));
+    CHECK(rag::backend::MetadataFilter{}.matches({{"tenant", "north"}}));
+
     HybridContractBackend candidate_backend;
     const rag::Vector hybrid_query{1.0F, 0.0F};
     const auto batch =
@@ -799,6 +812,23 @@ void test_postgres_backend_contract() {
         CHECK(verified);
         if (!verified)
             std::cerr << "postgres-exact: " << verified.error().message << '\n';
+    }
+
+    rag::backend::PostgresConfig hnsw_contract_config = config;
+    hnsw_contract_config.corpus += "_hnsw_contract";
+    hnsw_contract_config.vector_index = rag::backend::PostgresVectorIndex::hnsw;
+    auto hnsw_contract_backend = rag::backend::PostgresBackend::open(hnsw_contract_config);
+    CHECK(hnsw_contract_backend);
+    if (hnsw_contract_backend) {
+        lrs::tests::CandidateBackendContractOptions hnsw_contract;
+        hnsw_contract.key_prefix = "contract/postgres-hnsw";
+        hnsw_contract.dimension = 16;
+        hnsw_contract.require_durable = true;
+        const auto verified =
+            lrs::tests::run_candidate_backend_contract(**hnsw_contract_backend, hnsw_contract);
+        CHECK(verified);
+        if (!verified)
+            std::cerr << "postgres-hnsw: " << verified.error().message << '\n';
     }
 
     rag::preparation::PrepareOptions options;

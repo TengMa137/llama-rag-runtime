@@ -104,6 +104,19 @@ Result<Vector> parse_vector(std::string_view value) {
 
 std::string metadata_json(const Metadata& metadata) { return nlohmann::json(metadata).dump(); }
 
+std::string filter_json(const MetadataFilter& filter) {
+    return filter.supplied ? nlohmann::json(filter.required).dump() : "";
+}
+
+std::string filter_predicate(std::string_view parameter) {
+    const std::string value = "NULLIF(" + std::string(parameter) + "::text,'')::jsonb";
+    return "(" + value + " IS NULL OR (" + value +
+           " <> '{}'::jsonb AND NOT EXISTS (SELECT 1 FROM jsonb_each(" + value +
+           ") AS filter_entry(key,allowed) WHERE "
+           "jsonb_array_length(filter_entry.allowed)=0 OR NOT (d.metadata ? filter_entry.key) "
+           "OR NOT (filter_entry.allowed ? (d.metadata ->> filter_entry.key)))))";
+}
+
 std::string string_array_json(std::span<const std::string> values) {
     return nlohmann::json(values).dump();
 }
@@ -232,14 +245,17 @@ Result<void> prepare_connection(Connection& connection, void* opaque) {
              "JOIN " +
              q + ".chunks c ON c.corpus_id=p.corpus_id AND c.chunk_key=p.chunk_key JOIN " + q +
              ".documents d ON d.corpus_id=c.corpus_id AND d.external_id=c.document_id "
-             "CROSS JOIN corpus_stats cs WHERE p.corpus_id=$1::bigint AND d.metadata @> $2::jsonb "
-             "GROUP BY p.chunk_key ORDER BY score DESC,p.chunk_key ASC LIMIT $4::bigint",
+             "CROSS JOIN corpus_stats cs WHERE p.corpus_id=$1::bigint AND " +
+             filter_predicate("$2") +
+             " GROUP BY p.chunk_key ORDER BY score DESC,p.chunk_key ASC LIMIT $4::bigint",
          4},
         {"lrs_dense_exact",
          "SELECT c.chunk_key,-(c.embedding <#> $3::vector)::real AS score FROM " + q +
              ".chunks c JOIN " + q +
              ".documents d ON d.corpus_id=c.corpus_id AND d.external_id=c.document_id "
-             "WHERE c.corpus_id=$1::bigint AND d.metadata @> $2::jsonb "
+             "WHERE c.corpus_id=$1::bigint AND " +
+             filter_predicate("$2") +
+             " "
              "ORDER BY c.embedding <#> $3::vector,c.chunk_key ASC LIMIT $4::bigint",
          4},
         {"lrs_fetch",
@@ -301,13 +317,13 @@ Result<QueryResult> hnsw_candidates(Connection& connection, const PostgresConfig
         dimension + "))::real AS score FROM " + q + ".chunks c JOIN " + q +
         ".documents d ON d.corpus_id=c.corpus_id AND d.external_id=c.document_id "
         "WHERE c.corpus_id=" +
-        std::to_string(corpus.id) + " AND d.metadata @> $1::jsonb ORDER BY (c.embedding::vector(" +
-        dimension + ")) <#> $2::vector(" + dimension + "),c.chunk_key ASC LIMIT $3::bigint";
+        std::to_string(corpus.id) + " AND " + filter_predicate("$1") +
+        " ORDER BY (c.embedding::vector(" + dimension + ")) <#> $2::vector(" + dimension +
+        "),c.chunk_key ASC LIMIT $3::bigint";
     if (auto prepared = connection.prepare(name, sql, 3); !prepared)
         return unexpected(prepared.error());
-    const std::array<std::string, 3> parameters{metadata_json(request.filter.required),
-                                                vector_text(request.query),
-                                                std::to_string(request.k)};
+    const std::array<std::string, 3> parameters{
+        filter_json(request.filter), vector_text(request.query), std::to_string(request.k)};
     return connection.execute_prepared(name, parameters);
 }
 
@@ -336,8 +352,8 @@ struct PostgresBackend::Impl {
         if (terms.empty())
             return CandidateList{};
         const std::array<std::string, 4> parameters{
-            std::to_string((*corpus)->id), metadata_json(request.filter.required),
-            string_array_json(terms), std::to_string(request.k)};
+            std::to_string((*corpus)->id), filter_json(request.filter), string_array_json(terms),
+            std::to_string(request.k)};
         auto result = connection.execute_prepared("lrs_lexical", parameters);
         if (!result)
             return unexpected(result.error());
@@ -373,7 +389,7 @@ struct PostgresBackend::Impl {
             result = hnsw_candidates(connection, config, **corpus, request);
         } else {
             const std::array<std::string, 4> parameters{
-                std::to_string((*corpus)->id), metadata_json(request.filter.required),
+                std::to_string((*corpus)->id), filter_json(request.filter),
                 vector_text(request.query), std::to_string(request.k)};
             result = connection.execute_prepared("lrs_dense_exact", parameters);
         }

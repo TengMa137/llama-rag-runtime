@@ -1,8 +1,10 @@
 #pragma once
 // Backend-neutral records and candidate retrieval contract.
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <span>
 #include <string>
@@ -19,17 +21,42 @@ using ChunkKey = std::string;
 using DocumentRevision = std::uint64_t;
 
 struct MetadataFilter {
-    // Exact string tags combined with AND. A map gives canonical ordering for
-    // persistence, fingerprints, SQL binding, and deterministic tests.
-    Metadata required;
+    using AllowedValues = std::vector<std::string>;
+    using Requirements = std::map<std::string, AllowedValues>;
+
+    // Keys are combined with AND and values within a key with OR. The map and
+    // normalized vectors give canonical ordering for SQL binding and acks.
+    Requirements required;
+    bool supplied = false;
+
+    MetadataFilter() = default;
+
+    // Scalar compatibility: existing callers and the C ABI express one value
+    // per key and are normalized into singleton sets.
+    MetadataFilter(Metadata scalar) : supplied(true) {
+        for (auto& [key, value] : scalar)
+            required.emplace(std::move(key), AllowedValues{std::move(value)});
+    }
+
+    MetadataFilter(Requirements values) : required(std::move(values)), supplied(true) {
+        for (auto& [key, allowed] : required) {
+            std::sort(allowed.begin(), allowed.end());
+            allowed.erase(std::unique(allowed.begin(), allowed.end()), allowed.end());
+        }
+    }
 
     [[nodiscard]] bool empty() const noexcept { return required.empty(); }
-    [[nodiscard]] explicit operator bool() const noexcept { return !empty(); }
+    [[nodiscard]] explicit operator bool() const noexcept { return supplied; }
 
     [[nodiscard]] bool matches(const Metadata& actual) const noexcept {
-        for (const auto& [key, value] : required) {
+        if (!supplied)
+            return true;
+        if (required.empty())
+            return false;
+        for (const auto& [key, allowed] : required) {
             const auto found = actual.find(key);
-            if (found == actual.end() || found->second != value)
+            if (found == actual.end() ||
+                !std::binary_search(allowed.begin(), allowed.end(), found->second))
                 return false;
         }
         return true;

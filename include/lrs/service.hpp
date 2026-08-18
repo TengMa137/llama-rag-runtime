@@ -32,7 +32,8 @@ class Service {
   private:
     bool grounded_generate(const std::string& body,
                            const std::function<bool(const std::string&)>& delta,
-                           std::string& sources, std::string& model, std::string& error) const;
+                           std::string& sources, std::string& filter_ack, std::string& model,
+                           std::string& error) const;
     Config config_;
     ModelClient embedding_;
     ModelClient generation_;

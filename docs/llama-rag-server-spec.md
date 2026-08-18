@@ -1294,7 +1294,7 @@ Returns retrieval results without answer generation.
   "mode": "hybrid",
   "filter": {
     "language": "en",
-    "audience": "all"
+    "sensitivity": ["general", "restricted"]
   },
   "include_content": true,
   "include_scores": true
@@ -1315,13 +1315,20 @@ Returns retrieval results without answer generation.
       "document_id": "architecture/storage",
       "chunk_id": "architecture/storage#3:91aa7b21",
       "title": "Storage",
-      "metadata": {"language": "en", "audience": "all"},
+      "metadata": {"language": "en", "sensitivity": "general"},
       "text": "...",
       "start_line": 88,
       "end_line": 112,
       "score": 0.0294
     }
   ],
+  "filter_ack": {
+    "contract": "metadata-any-of-v1",
+    "applied": {
+      "language": ["en"],
+      "sensitivity": ["general", "restricted"]
+    }
+  },
   "timing_ms": {
     "queue": 0.4,
     "embedding": 8.2,
@@ -1333,9 +1340,16 @@ Returns retrieval results without answer generation.
 }
 ```
 
-Filter values are strings. Clauses use exact equality, are combined with AND,
-and are enforced by lexical, dense, and hybrid retrieval. Scores are opaque,
-mode-specific ranking values.
+Filter values are strings or arrays of strings. Values are sorted and
+deduplicated, values within a key use OR, and keys use AND. An empty value set,
+missing or unknown metadata key, or explicitly empty filter matches nothing;
+only an absent `filter` is unrestricted. Filters allow at most 64 keys, 256
+values per key, 1,024 total values, and 65,536 bytes. Invalid members or limits
+return HTTP 400. The predicate is enforced by lexical, dense, and hybrid
+retrieval. A supplied filter is echoed in normalized `filter_ack`, including
+`applied: {}` for an explicit `{}`. Clients requiring filtered retrieval must <!-- [LRS-SEARCH-003] -->
+reject a missing, unknown-contract, or unequal acknowledgement. Scores are
+opaque, mode-specific ranking values.
 
 ---
 
@@ -1415,7 +1429,7 @@ event: rag.started
 data: {"request_id":"req_01J...","index_revision":185}
 
 event: rag.retrieval.completed
-data: {"sources":[...],"timing_ms":{"retrieval":13.1}}
+data: {"sources":[...],"filter_ack":{"contract":"metadata-any-of-v1","applied":{"language":["en"]}},"timing_ms":{"retrieval":13.1}}
 
 event: rag.generation.delta
 data: {"text":"The index"}
@@ -1427,7 +1441,7 @@ event: rag.completed
 data: {"finish_reason":"stop","usage":{...}}
 ```
 
-The source list must be emitted before generation deltas so the frontend can render citation metadata immediately. <!-- [LRS-SPEC-053] -->
+The source list must be emitted before generation deltas so the frontend can render citation metadata immediately. Filtered legacy query streams include `filter_ack` in this event. OpenAI-compatible non-streaming chat uses top-level `rag_filter_ack`; streaming chat includes `rag_filter_ack` in its first chunk beside `rag_sources`. Acknowledgements are omitted when `filter` is absent. <!-- [LRS-SPEC-053] -->
 
 ---
 

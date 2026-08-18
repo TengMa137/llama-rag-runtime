@@ -2,14 +2,14 @@
   "version": 1,
   "k": 3,
   "documents": [
-    {"id": "storage", "text": "The portable retrieval index is persisted in a ragdb file.", "metadata": {"audience": "engineering"}},
-    {"id": "deletion", "text": "Deleting a document creates tombstones before compaction.", "metadata": {"audience": "engineering"}},
-    {"id": "ranking", "text": "Hybrid retrieval fuses BM25 lexical and dense vector rankings.", "metadata": {"audience": "engineering"}},
-    {"id": "unrelated", "text": "The harbor weather is calm today.", "metadata": {"audience": "public"}}
+    {"id": "storage", "text": "The portable retrieval index is persisted in a ragdb file.", "metadata": {"sensitivity": "general"}},
+    {"id": "deletion", "text": "Deleting a document creates tombstones before compaction.", "metadata": {"sensitivity": "general"}},
+    {"id": "ranking", "text": "Hybrid retrieval fuses BM25 lexical and dense vector rankings.", "metadata": {"sensitivity": "general"}},
+    {"id": "unrelated", "text": "The harbor weather is calm today.", "metadata": {"sensitivity": "restricted"}}
   ],
   "queries": [
     {"text": "portable persisted index", "relevant": ["storage"]},
-    {"text": "BM25 dense fusion", "relevant": ["ranking"], "filter": {"audience": "engineering"}},
+    {"text": "BM25 dense fusion", "relevant": ["ranking"], "filter": {"sensitivity": "general"}},
     {"text": "document tombstones", "relevant": ["deletion"]}
   ]
 }

@@ -412,12 +412,18 @@ after a complete report.
 - `dense`: embed the query and run dense similarity search;
 - `hybrid`: run rag.cpp's standard hybrid pipeline with reciprocal-rank fusion.
 
-An optional `filter` object contains exact string matches combined with AND.
-The predicate is applied before lexical truncation, inside dense candidate
+An optional `filter` object accepts a string or string array per key. Values are
+sorted and deduplicated; values within one key are ORed and keys are ANDed.
+Missing keys, unknown keys, empty value arrays, and an explicitly empty filter
+match nothing. Only an absent `filter` is unrestricted. Filters retain the
+64-key/65,536-byte bounds and additionally allow at most 256 values per key and
+1,024 values total. The predicate is applied before lexical truncation, inside dense candidate
 selection, and before/after hybrid fusion so disallowed documents cannot leak
 through a semantic path. The response contains sorted results with document ID,
 stable chunk ID, title, metadata, one-based rank, mode-specific score, line
-offsets, and source text. `top_k` must be between 1 and 100.
+offsets, and source text. Filtered responses also contain a normalized
+`filter_ack` with contract `metadata-any-of-v1`; callers requiring enforcement
+must compare it exactly and fail closed. `top_k` must be between 1 and 100.
 
 Within rag.cpp, hybrid lexical and dense work runs concurrently. Small dense
 corpora use SIMD-accelerated exact similarity; larger corpora use HNSW according
@@ -431,7 +437,8 @@ Every dense or hybrid chat query still requires one query embedding. Document em
 `POST /v1/rag/query` currently uses the final message's `content` as the retrieval query. It emits:
 
 1. `rag.started`;
-2. `rag.retrieval.completed` with the authoritative ordered sources;
+2. `rag.retrieval.completed` with the authoritative ordered sources and, for a
+   filtered request, `filter_ack`;
 3. zero or more `rag.generation.delta` events;
 4. `rag.completed`, or `rag.error` on failure.
 
@@ -439,7 +446,7 @@ The service builds a prompt that labels retrieved chunks as untrusted data, asks
 
 Generation uses streaming `POST /v1/chat/completions`. The client translates OpenAI-style `choices[0].delta.content` records into the RAG event contract. A failed or malformed generation stream does not damage the index and subsequent search requests remain available. A closed downstream `DataSink` causes the upstream callback to stop, providing best-effort cancellation.
 
-The coordinator also exposes OpenAI-compatible `GET /v1/models` and `POST /v1/chat/completions`. Chat completions support streaming and non-streaming responses and use the same single-pass grounded retrieval pipeline. A `rag_sources` response extension carries the ranked chunks.
+The coordinator also exposes OpenAI-compatible `GET /v1/models` and `POST /v1/chat/completions`. Chat completions support streaming and non-streaming responses and use the same single-pass grounded retrieval pipeline. A `rag_sources` response extension carries the ranked chunks. Filtered non-streaming responses carry `rag_filter_ack`; streaming responses carry it in the first chunk beside `rag_sources`.
 
 Current query limitations:
 

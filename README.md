@@ -188,7 +188,7 @@ curl http://127.0.0.1:8080/v1/rag/documents \
     "content_type": "text/markdown",
     "content": "# Storage\nThe index is persisted in a rag.cpp database.",
     "metadata": {
-      "audience": "all",
+      "sensitivity": "general",
       "source": "notion",
       "url": "https://notion.example/storage",
       "lastSyncedAt": "2026-08-10T09:00:00Z"
@@ -217,7 +217,8 @@ bounded error when present. It never returns source content, vectors, or model
 credentials. `ingestion.workers` accepts 1–4 workers; the queue rejects excess
 jobs at `ingestion.queue_capacity` rather than growing without bound.
 
-Filter searches with exact-match, AND-combined tags:
+Filter searches use AND across metadata keys and OR within each key. Scalar
+values remain accepted as singleton lists:
 
 ```bash
 curl http://127.0.0.1:8080/v1/rag/search \
@@ -226,11 +227,14 @@ curl http://127.0.0.1:8080/v1/rag/search \
     "query": "How is the index stored?",
     "mode": "hybrid",
     "top_k": 8,
-    "filter": {"audience": "all", "source": "notion"}
+    "filter": {"sensitivity": ["general"], "source": ["notion", "slack"]}
   }'
 ```
 
-The filter is enforced in lexical, dense, and hybrid modes. Every hit includes
+Filtered responses include a normalized `filter_ack` using the
+`metadata-any-of-v1` contract. Clients that require filtered retrieval should
+reject a missing, unknown-contract, or unequal acknowledgement. The filter is
+enforced in lexical, dense, and hybrid modes. Every hit includes
 `document_id`, `chunk_id`, `title`, `metadata`, `score`, source lines, and text.
 Scores are mode-specific ranking values and should only be compared within one
 result set.

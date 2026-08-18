@@ -66,12 +66,8 @@ rag::Metadata metadata_from_arrays(const char* const* keys, const char* const* v
 rag::index::MetaFilter exact_match_filter(rag::Metadata wanted) {
     if (wanted.empty())
         return {};
-    return [wanted = std::move(wanted)](const rag::Metadata& candidate) {
-        return std::all_of(wanted.begin(), wanted.end(), [&](const auto& item) {
-            const auto found = candidate.find(item.first);
-            return found != candidate.end() && found->second == item.second;
-        });
-    };
+    return [filter = rag::backend::MetadataFilter(std::move(wanted))](
+               const rag::Metadata& candidate) { return filter.matches(candidate); };
 }
 
 std::string public_chunk_id(const rag::SearchResult& hit) {
