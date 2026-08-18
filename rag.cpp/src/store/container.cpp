@@ -2,7 +2,6 @@
 
 #include "rag/store/container.hpp"
 
-#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
@@ -12,30 +11,50 @@
 #include <fstream>
 #include <new>
 #include <random>
-#include <set>
-#include <sstream>
 
 #include <fcntl.h>
 #include <unistd.h>
 
+#include "rag/store/container_layout.hpp"
+#include "rag/store/container_view.hpp"
+
 namespace rag::store {
+
+namespace {
+
+const std::array<std::uint32_t, 256>& crc_table() {
+    static const std::array<std::uint32_t, 256> table = [] {
+        std::array<std::uint32_t, 256> value{};
+        for (std::uint32_t i = 0; i < 256; ++i) {
+            std::uint32_t current = i;
+            for (int bit = 0; bit < 8; ++bit)
+                current = (current & 1) ? (0xEDB88320u ^ (current >> 1)) : (current >> 1);
+            value[i] = current;
+        }
+        return value;
+    }();
+    return table;
+}
+
+class Crc32Accumulator {
+  public:
+    void update(std::string_view data) noexcept {
+        for (const unsigned char byte : data)
+            value_ = crc_table()[(value_ ^ byte) & 0xFF] ^ (value_ >> 8);
+    }
+    [[nodiscard]] std::uint32_t finish() const noexcept { return value_ ^ 0xFFFFFFFFu; }
+
+  private:
+    std::uint32_t value_ = 0xFFFFFFFFu;
+};
+
+} // namespace
 
 // ─── CRC32 (IEEE 802.3, reflected) ────────────────────────────────────────────
 std::uint32_t crc32(std::string_view data) noexcept {
-    static const std::array<std::uint32_t, 256> table = [] {
-        std::array<std::uint32_t, 256> t{};
-        for (std::uint32_t i = 0; i < 256; ++i) {
-            std::uint32_t c = i;
-            for (int k = 0; k < 8; ++k)
-                c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
-            t[i] = c;
-        }
-        return t;
-    }();
-    std::uint32_t crc = 0xFFFFFFFFu;
-    for (unsigned char b : data)
-        crc = table[(crc ^ b) & 0xFF] ^ (crc >> 8);
-    return crc ^ 0xFFFFFFFFu;
+    Crc32Accumulator accumulator;
+    accumulator.update(data);
+    return accumulator.finish();
 }
 
 // ─── Serialize ────────────────────────────────────────────────────────────────
@@ -77,64 +96,15 @@ std::string Container::serialize() const {
 // ─── Parse ────────────────────────────────────────────────────────────────────
 Result<Container> Container::parse(std::string_view blob) {
     try {
-        constexpr std::size_t header_size = 28;
-        constexpr std::size_t entry_size = 20;
-        constexpr std::size_t trailer_size = 4;
-        if (blob.size() < header_size + trailer_size)
-            return fail<Container>(Errc::corrupt_index, "too short");
-
-        // Verify CRC first (last 4 bytes).
-        std::string_view body = blob.substr(0, blob.size() - 4);
-        std::uint32_t stored_crc;
-        std::memcpy(&stored_crc, blob.data() + blob.size() - 4, 4);
-        if (crc32(body) != stored_crc)
-            return fail<Container>(Errc::corrupt_index, "crc mismatch");
-
-        Reader r(blob);
-        std::string_view magic;
-        if (!r.bytes(8, magic) || std::memcmp(magic.data(), kMagic, 8) != 0)
-            return fail<Container>(Errc::corrupt_index, "bad magic");
-
+        auto layout = validate_container_layout(blob);
+        if (!layout)
+            return unexpected(layout.error());
         Container c;
-        if (!r.u(c.major_) || !r.u(c.minor_))
-            return fail<Container>(Errc::corrupt_index, "version");
-        if (c.major_ != kFormatMajor)
-            return fail<Container>(Errc::corrupt_index,
-                                   "unsupported format major " + std::to_string(c.major_) +
-                                       " (reader supports " + std::to_string(kFormatMajor) + ")");
-        std::uint32_t nsections;
-        std::uint64_t reserved;
-        if (!r.u(c.flags_) || !r.u(nsections) || !r.u(reserved))
-            return fail<Container>(Errc::corrupt_index, "header");
-        if (nsections > kMaxSections ||
-            nsections > (blob.size() - header_size - trailer_size) / entry_size)
-            return fail<Container>(Errc::corrupt_index, "invalid section count");
-
-        struct Entry {
-            std::uint32_t tag;
-            std::uint64_t off, len;
-        };
-        std::vector<Entry> entries(nsections);
-        std::set<std::uint32_t> tags;
-        for (auto& e : entries)
-            if (!r.u(e.tag) || !r.u(e.off) || !r.u(e.len))
-                return fail<Container>(Errc::corrupt_index, "section table");
-            else if (!tags.insert(e.tag).second)
-                return fail<Container>(Errc::corrupt_index, "duplicate section");
-
-        const std::uint64_t payload_begin = header_size + entry_size * nsections;
-        const std::uint64_t payload_end = blob.size() - trailer_size;
-        std::sort(entries.begin(), entries.end(),
-                  [](const Entry& left, const Entry& right) { return left.off < right.off; });
-        std::uint64_t previous_end = payload_begin;
-        for (const auto& e : entries) {
-            if (e.off < payload_begin || e.off > payload_end || e.len > payload_end - e.off)
-                return fail<Container>(Errc::corrupt_index, "section out of bounds");
-            if (e.off < previous_end)
-                return fail<Container>(Errc::corrupt_index, "overlapping sections");
-            previous_end = e.off + e.len;
-            c.sections_[e.tag] = std::string(blob.substr(e.off, e.len));
-        }
+        c.major_ = layout->format_major;
+        c.minor_ = layout->format_minor;
+        c.flags_ = layout->flags;
+        for (const auto& section : layout->sections)
+            c.sections_[section.tag] = std::string(blob.substr(section.offset, section.length));
         return c;
     } catch (const std::bad_alloc&) {
         return fail<Container>(Errc::corrupt_index, "container allocation failed");
@@ -178,12 +148,36 @@ Result<void> Container::write_file(const std::string& path) const {
                                 std::to_string(counter.fetch_add(1, std::memory_order_relaxed)) +
                                 "." + std::to_string(rd());
 
-        const std::string blob = serialize();
         {
             std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
             if (!out)
                 return fail<void>(Errc::io_error, "open " + tmp);
-            out.write(blob.data(), static_cast<std::streamsize>(blob.size()));
+            Writer prefix;
+            prefix.bytes(std::string_view(kMagic, 8));
+            prefix.u<std::uint16_t>(major_);
+            prefix.u<std::uint16_t>(minor_);
+            prefix.u<std::uint32_t>(flags_);
+            prefix.u<std::uint32_t>(static_cast<std::uint32_t>(sections_.size()));
+            prefix.u<std::uint64_t>(0);
+            constexpr std::uint64_t header_size = 28;
+            constexpr std::uint64_t entry_size = 20;
+            std::uint64_t cursor = header_size + entry_size * sections_.size();
+            for (const auto& [tag, payload] : sections_) {
+                prefix.u<std::uint32_t>(tag);
+                prefix.u<std::uint64_t>(cursor);
+                prefix.u<std::uint64_t>(static_cast<std::uint64_t>(payload.size()));
+                cursor += payload.size();
+            }
+            Crc32Accumulator checksum;
+            const auto write_part = [&](std::string_view bytes) {
+                out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+                checksum.update(bytes);
+            };
+            write_part(prefix.data());
+            for (const auto& [tag, payload] : sections_)
+                write_part(payload);
+            const std::uint32_t trailer = checksum.finish();
+            out.write(reinterpret_cast<const char*>(&trailer), sizeof(trailer));
             out.flush();
             if (!out) {
                 std::remove(tmp.c_str());
@@ -275,14 +269,20 @@ void Container::sweep_orphan_temps(const std::string& path) {
 
 Result<Container> Container::read_file(const std::string& path) {
     try {
-        std::ifstream in(path, std::ios::binary);
-        if (!in)
-            return fail<Container>(Errc::io_error, "open " + path);
-        std::stringstream ss;
-        ss << in.rdbuf();
-        if (!in.good() && !in.eof())
-            return fail<Container>(Errc::io_error, "read " + path);
-        return parse(ss.str());
+        auto view = ContainerView::open_file(path);
+        if (!view)
+            return unexpected(view.error());
+        Container container;
+        container.major_ = view->format_major();
+        container.minor_ = view->format_minor();
+        container.flags_ = view->flags();
+        for (const auto& section : view->sections()) {
+            const auto payload = view->get_raw(section.tag);
+            if (!payload)
+                return fail<Container>(Errc::corrupt_index, "validated section is missing");
+            container.sections_.emplace(section.tag, std::string(*payload));
+        }
+        return container;
     } catch (const std::exception& error) {
         return fail<Container>(Errc::io_error, std::string("read failed: ") + error.what());
     } catch (...) {

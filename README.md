@@ -26,6 +26,17 @@ cmake --build --preset macos-dev
 ctest --preset macos-dev
 ```
 
+FAISS is an optional desktop dense-index implementation. The default build has
+no FAISS dependency. To enable it, install FAISS separately and configure with
+`-DLRS_ENABLE_FAISS=ON`; CMake never downloads it. Android always uses native
+exact/HNSW indexes.
+
+PostgreSQL/pgvector is an optional parent-runtime backend. Install libpq and the
+pgvector extension on the target server, then configure with
+`-DLRS_ENABLE_POSTGRES=ON`. The default build remains fully embedded and CMake
+never downloads either dependency. PostgreSQL is desktop/server-only; Android
+always uses embedded storage.
+
 The main executables are:
 
 ```text
@@ -40,7 +51,14 @@ Edit `config/server.models.json` and set the two GGUF paths:
 ```json
 {
   "listen": { "host": "127.0.0.1", "port": 8080 },
-  "index": { "path": "data/knowledge.ragdb" },
+  "retrieval": {
+    "backend": "embedded",
+    "embedded": {
+      "path": "data/knowledge.ragdb",
+      "dense": { "implementation": "native", "algorithm": "automatic" }
+    }
+  },
+  "ingestion": { "workers": 1, "queue_capacity": 64 },
   "inference": {
     "spawn": true,
     "llama_server": "build/macos-dev/bin/llama-server",
@@ -67,6 +85,68 @@ Edit `config/server.models.json` and set the two GGUF paths:
 ```
 
 The configured embedding dimension must match the embedding model. `rag.context_tokens` must be smaller than the generation model context size.
+
+Dense policies are explicit. Native accepts `automatic`, `exact`, or `hnsw`;
+FAISS accepts `flat`, `hnsw`, `ivf-sq8`, or `ivf-pq` in a FAISS-enabled desktop
+build. The legacy `index.path` key is still read when `retrieval.embedded.path`
+is absent.
+
+To replace embedded storage with PostgreSQL, put the connection string in an
+environment variable and use [`config/server.postgres.json`](config/server.postgres.json):
+
+```bash
+export LRS_POSTGRES_URL='host=db.example dbname=rag user=rag sslmode=verify-full sslrootcert=/path/to/ca.pem'
+./build/macos-dev/bin/llama-rag-server --config config/server.postgres.json
+```
+
+The JSON contains only the environment-variable name, never credentials.
+Non-loopback database connections require certificate-verifying TLS
+(`verify-ca` or `verify-full`). The backend defaults to exact pgvector cosine
+search; `vector_index: "hnsw"` is opt-in. Database unavailability fails startup
+or the request closed—there is no fallback to a stale local index.
+
+### Explicit storage migration
+
+A PostgreSQL-enabled build also produces `bin/lrs-rag-migrate`. Migration never
+changes or deletes its source and never edits the server configuration. Keep the
+application on its current backend until the command returns a report with
+`"complete": true`, then perform configuration cutover separately.
+
+```bash
+# Embedded checkpoint plus ready records in knowledge.ragdb.jobs → PostgreSQL
+./build/macos-dev/bin/lrs-rag-migrate embedded-to-postgres \
+  --source data/knowledge.ragdb \
+  --connection-env LRS_POSTGRES_URL \
+  --schema lrs_rag --corpus default \
+  --batch-size 256 --report migration-to-postgres.json
+
+# PostgreSQL → a new embedded checkpoint
+./build/macos-dev/bin/lrs-rag-migrate postgres-to-embedded \
+  --destination data/knowledge-export.ragdb \
+  --connection-env LRS_POSTGRES_URL \
+  --schema lrs_rag --corpus default \
+  --batch-size 256 --report migration-to-embedded.json
+```
+
+Each destination stores progress after bounded batches, so rerunning the same
+command resumes safely. If data reached the destination just before its progress
+record, the tool verifies that it is an exact source prefix before continuing.
+It rejects conflicting destination content and incompatible dimensions,
+embedding identities, chunking fingerprints, non-normalized vectors, or invalid
+stable IDs. Completion compares live document/chunk counts, document and vector
+checksums, and sampled exact-search rankings. Only active ready revisions are
+transferred; pending, failed, superseded, and cancelled jobs are ignored.
+
+The coordinator binds to loopback by default. A non-loopback `listen.host`
+requires a shared secret of at least 16 bytes:
+
+```json
+"authentication": { "api_key": "replace-with-a-random-secret" }
+```
+
+When configured, every request must include `X-API-Key`. The coordinator serves
+plain HTTP, so put TLS at a trusted reverse proxy or use a private encrypted
+network before sending this header across a network.
 
 ## Run
 
@@ -106,11 +186,54 @@ curl http://127.0.0.1:8080/v1/rag/documents \
     "id": "docs/storage",
     "title": "Storage",
     "content_type": "text/markdown",
-    "content": "# Storage\nThe index is persisted in a rag.cpp database."
+    "content": "# Storage\nThe index is persisted in a rag.cpp database.",
+    "metadata": {
+      "audience": "all",
+      "source": "notion",
+      "url": "https://notion.example/storage",
+      "lastSyncedAt": "2026-08-10T09:00:00Z"
+    }
   }'
 ```
 
-The index is stored at `index.path`. Re-ingesting identical content returns `unchanged`; changed content replaces the document atomically.
+Metadata is an object containing up to 64 string key/value tags. It is persisted
+with the document. Re-ingesting identical content, title, and metadata returns
+`unchanged`; changing any of them replaces the document atomically.
+
+Synchronous ingestion remains the default. For on-demand uploads, request a
+bounded asynchronous job and follow its `Location` header:
+
+```bash
+curl -i http://127.0.0.1:8080/v1/rag/documents \
+  -H 'Content-Type: application/json' \
+  -H 'Prefer: respond-async' \
+  -d '{"id":"docs/async","content":"Queued and atomically activated."}'
+
+curl http://127.0.0.1:8080/v1/rag/jobs/job_...
+```
+
+The status response contains identity, revision, state, timestamps, and a
+bounded error when present. It never returns source content, vectors, or model
+credentials. `ingestion.workers` accepts 1–4 workers; the queue rejects excess
+jobs at `ingestion.queue_capacity` rather than growing without bound.
+
+Filter searches with exact-match, AND-combined tags:
+
+```bash
+curl http://127.0.0.1:8080/v1/rag/search \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "query": "How is the index stored?",
+    "mode": "hybrid",
+    "top_k": 8,
+    "filter": {"audience": "all", "source": "notion"}
+  }'
+```
+
+The filter is enforced in lexical, dense, and hybrid modes. Every hit includes
+`document_id`, `chunk_id`, `title`, `metadata`, `score`, source lines, and text.
+Scores are mode-specific ranking values and should only be compared within one
+result set.
 
 For the desktop HTTP API, send the complete document to `/v1/rag/documents`. Do not split it into chunks or vectorize it first: the coordinator asks rag.cpp for the chunks, sends those chunks to the configured embedding endpoint, and commits the document only after embedding succeeds. `/v1/rag/search` likewise accepts query text and computes its query embedding internally.
 
@@ -366,13 +489,33 @@ See `docs/MOBILE_RAG_CONTRACT.md` for the C ABI lifecycle and embedding contract
 
 ## Development
 
-Run the deterministic retrieval evaluation for all three profiles:
+Run the deterministic qrels evaluation for all three retrieval profiles:
 
 ```bash
-./build/macos-dev/libexec/lrs-rag-eval
+./build/macos-dev/libexec/lrs-rag-eval qrels
 ```
 
-It reads `tests/fixtures/qrels.json` and reports Recall@k, MRR, and nDCG@k.
+It reads `tests/fixtures/qrels.json` and reports recall, MRR, nDCG, filtered
+recall, p50/p95 query and update latency, dense memory, and process RSS. The
+dense evaluator compares an explicit policy with the native exact oracle:
+
+```bash
+./build/macos-release/libexec/lrs-rag-eval dense \
+  --vectors 100000 --dimension 384 --queries 100 --k 10 \
+  --implementation native --algorithm hnsw --enforce-gate
+
+./build/macos-release/libexec/lrs-rag-eval runtime \
+  --vectors 100000 --dimension 384 --queries 100 --k 10 \
+  --implementation native --algorithm hnsw
+```
+
+`runtime` reports search overhead at 0%, 5%, and 10% exact-delta growth plus
+compaction duration, peak RSS, and queries served during the build. The corpus
+contract is stored in `benchmarks/corpora.json`; the checked-in macOS baseline
+is `benchmarks/macos-arm64-2026-08-12.json`. Synthetic data makes regression
+runs reproducible, while the qrels fixture continues to test ranking semantics.
+`docs/RELEASE_VERIFICATION.md` records the backend, sanitizer, API, migration,
+and Android matrix used for the portable-runtime milestone.
 Run the complete native/component suite with `ctest --preset macos-dev`; one
 test starts a real loopback HTTP generation fixture and exercises persisted
 ingestion, retrieval, grounded streaming, deletion, reopen, and mobile supplied

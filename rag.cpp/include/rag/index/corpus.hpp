@@ -112,6 +112,8 @@ class Corpus {
 
     // ── Retrieval primitives ────────────────────────────────────────────────
     [[nodiscard]] std::vector<Hit> lexical_search(std::string_view query, std::size_t k) const;
+    [[nodiscard]] std::vector<Hit> lexical_search(std::string_view query, std::size_t k,
+                                                  const MetaFilter& filter) const;
     [[nodiscard]] Result<std::vector<Hit>> dense_search(std::string_view query,
                                                         std::size_t k) const;
 
@@ -346,6 +348,8 @@ class Corpus {
     [[nodiscard]] bool passes_locked(ChunkId id, const MetaFilter& f) const;
     [[nodiscard]] std::vector<Hit> lexical_search_locked(std::string_view query,
                                                          std::size_t k) const;
+    [[nodiscard]] std::vector<Hit> lexical_search_locked(std::string_view query, std::size_t k,
+                                                         const MetaFilter& filter) const;
     [[nodiscard]] Result<std::vector<Hit>>
     dense_search_locked(std::string_view query, std::size_t k, const MetaFilter& filter) const;
     [[nodiscard]] Result<void> build_locked();

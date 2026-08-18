@@ -16,6 +16,8 @@
 #include "rag/dense/backends.hpp"
 #include "rag/dense/embedder.hpp"
 #include "rag/index/corpus.hpp"
+#include "rag/ingestion/embedded_runtime.hpp"
+#include "rag/ingestion/runtime.hpp"
 #include "rag/pipeline/pipeline.hpp"
 #include "rag/retrieval/profile.hpp"
 
@@ -45,6 +47,21 @@ class Engine {
         return Engine{std::move(*c)};
     }
 
+    // Backend-neutral embedded runtime entry point. It restores a checkpoint,
+    // repairs/replays the durable job tail, and owns ingestion workers.
+    [[nodiscard]] static Result<Engine> open_runtime(ingestion::EmbeddedRuntimeConfig config) {
+        auto runtime = ingestion::EmbeddedRuntime::open(std::move(config));
+        if (!runtime)
+            return unexpected(runtime.error());
+        return Engine{std::move(*runtime)};
+    }
+
+    [[nodiscard]] static Result<Engine> open_runtime(std::unique_ptr<ingestion::Runtime> runtime) {
+        if (!runtime)
+            return fail<Engine>(Errc::invalid_argument, "ingestion runtime is required");
+        return Engine{std::move(runtime)};
+    }
+
     // Attach a dense embedder (enables hybrid). Fluent.
     Engine& with_embedder(dense::AnyEmbedder e) {
         corpus_.set_embedder(std::move(e));
@@ -61,6 +78,48 @@ class Engine {
                                     std::move(title));
     }
     Result<void> build() { return corpus_.build(); }
+
+    [[nodiscard]] Result<ingestion::Submission> ingest(ingestion::IngestionInput input,
+                                                       bool asynchronous = false) {
+        if (!runtime_)
+            return fail<ingestion::Submission>(Errc::unavailable,
+                                               "engine is using the legacy Corpus path");
+        return runtime_->submit(std::move(input), asynchronous);
+    }
+
+    [[nodiscard]] Result<ingestion::IngestionJob> erase(backend::DocumentKey document) {
+        if (!runtime_)
+            return fail<ingestion::IngestionJob>(Errc::unavailable,
+                                                 "engine is using the legacy Corpus path");
+        return runtime_->erase(std::move(document));
+    }
+
+    [[nodiscard]] Result<ingestion::JobInfo> job(const ingestion::JobId& id) const {
+        if (!runtime_)
+            return fail<ingestion::JobInfo>(Errc::unavailable,
+                                            "engine is using the legacy Corpus path");
+        return runtime_->job(id);
+    }
+
+    [[nodiscard]] Result<ingestion::IngestionJob> wait(const ingestion::JobId& id) {
+        if (!runtime_)
+            return fail<ingestion::IngestionJob>(Errc::unavailable,
+                                                 "engine is using the legacy Corpus path");
+        return runtime_->wait(id);
+    }
+
+    [[nodiscard]] Result<std::vector<SearchResult>> search(backend::SearchRequest request) const {
+        if (!runtime_)
+            return fail<std::vector<SearchResult>>(Errc::unavailable,
+                                                   "engine is using the legacy Corpus path");
+        return runtime_->search(std::move(request));
+    }
+
+    [[nodiscard]] Result<void> checkpoint() {
+        if (!runtime_)
+            return fail<void>(Errc::unavailable, "engine is using the legacy Corpus path");
+        return runtime_->checkpoint();
+    }
 
     // Search: returns resolved, ranked results.
     [[nodiscard]] Result<std::vector<SearchResult>>
@@ -150,14 +209,23 @@ class Engine {
         return out;
     }
 
+    // Deprecated compatibility accessor. It is meaningful only for engines
+    // constructed through the legacy Corpus/open APIs.
     [[nodiscard]] index::Corpus& corpus() noexcept { return corpus_; }
     [[nodiscard]] const index::Corpus& corpus() const noexcept { return corpus_; }
+
+    [[nodiscard]] bool uses_portable_runtime() const noexcept { return runtime_ != nullptr; }
 
     Result<void> save(const std::string& path) const { return corpus_.save(path); }
 
   private:
+    explicit Engine(std::unique_ptr<ingestion::Runtime> runtime)
+        : corpus_(index::CorpusConfig{}), pipeline_(pipeline::Pipeline::standard()),
+          runtime_(std::move(runtime)) {}
+
     index::Corpus corpus_;
     pipeline::Pipeline pipeline_;
+    std::unique_ptr<ingestion::Runtime> runtime_;
 };
 
 } // namespace rag

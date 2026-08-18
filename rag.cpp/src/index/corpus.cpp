@@ -1,6 +1,7 @@
 // rag/index/corpus.cpp — document ingest, hybrid indexing, persistence.
 
 #include "rag/index/corpus.hpp"
+#include "rag/core/keys.hpp"
 #include "rag/dense/simd.hpp"
 #include "rag/gpu/device.hpp"
 #include "rag/store/container.hpp"
@@ -408,6 +409,12 @@ std::vector<Hit> Corpus::lexical_search(std::string_view query, std::size_t k) c
     return lexical_search_locked(query, k);
 }
 
+std::vector<Hit> Corpus::lexical_search(std::string_view query, std::size_t k,
+                                        const MetaFilter& filter) const {
+    std::shared_lock lk(mu_);
+    return lexical_search_locked(query, k, filter);
+}
+
 std::vector<Hit> Corpus::lexical_search_locked(std::string_view query, std::size_t k) const {
     // add_document() no longer finalizes on every insert (that was quadratic);
     // a caller may therefore query without an intervening build(). finalize()
@@ -434,6 +441,29 @@ std::vector<Hit> Corpus::lexical_search_locked(std::string_view query, std::size
             continue;
         out.push_back(h);
         if (out.size() >= k)
+            break;
+    }
+    return out;
+}
+
+std::vector<Hit> Corpus::lexical_search_locked(std::string_view query, std::size_t k,
+                                               const MetaFilter& filter) const {
+    if (!filter)
+        return lexical_search_locked(query, k);
+
+    // A selective permission filter must not be applied only to BM25's top-k:
+    // doing so can yield no results even when lower-ranked allowed documents
+    // exist. Rank all lexical matches, retain only allowed live documents, and
+    // then truncate. This is correctness-first; BM25 can later accept an allow
+    // predicate directly if filtered lexical latency becomes material.
+    auto hits = lexical_search_locked(query, bm25_.size());
+    std::vector<Hit> out;
+    out.reserve(std::min(hits.size(), k));
+    for (const auto& hit : hits) {
+        if (!passes_locked(hit.chunk, filter))
+            continue;
+        out.push_back(hit);
+        if (out.size() == k)
             break;
     }
     return out;
@@ -608,8 +638,13 @@ SearchResult Corpus::resolve_locked(const Hit& h) const {
     r.context = ch->context;
     r.start_line = ch->start_line;
     r.end_line = ch->end_line;
-    if (const Document* d = document_locked(ch->doc))
+    if (const Document* d = document_locked(ch->doc)) {
         r.uri = d->uri;
+        r.document_key = d->uri;
+        r.chunk_key = stable_chunk_key(d->uri, ch->start_line, ch->end_line, ch->text);
+        r.title = d->title;
+        r.metadata = d->meta;
+    }
     return r;
 }
 

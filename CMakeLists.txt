@@ -15,8 +15,79 @@ option(LRS_BUILD_MOBILE "Build the in-process mobile C ABI shared library" ON)
 option(LRS_BUILD_MOBILE_SMOKE "Build the Android/device mobile smoke executable" OFF)
 option(LRS_BUILD_SPEC_CHECK "Build the native specification checker" ON)
 option(LRS_WARNINGS_AS_ERRORS "Treat project warnings as errors" ON)
+option(LRS_ENABLE_FAISS "Enable an installed desktop FAISS package" OFF)
+option(LRS_ENABLE_POSTGRES "Enable an installed libpq PostgreSQL backend" OFF)
+if(LRS_ENABLE_POSTGRES)
+  find_package(PostgreSQL REQUIRED)
+endif()
+add_compile_definitions(
+  LRS_ENABLE_FAISS=$<BOOL:${LRS_ENABLE_FAISS}>
+  LRS_ENABLE_POSTGRES=$<BOOL:${LRS_ENABLE_POSTGRES}>)
 
 set(LRS_FORMAT_SOURCES
+  rag.cpp/include/rag/backend/candidate_backend.hpp
+  rag.cpp/include/rag/backend/embedded_checkpoint.hpp
+  rag.cpp/include/rag/backend/embedded_backend.hpp
+  rag.cpp/include/rag/backend/postgres_backend.hpp
+  rag.cpp/include/rag/backend/postgres_config.hpp
+  rag.cpp/include/rag/core/keys.hpp
+  rag.cpp/include/rag/dense/cache_fingerprint.hpp
+  rag.cpp/include/rag/dense/exact_sidecar.hpp
+  rag.cpp/include/rag/dense/faiss_index.hpp
+  rag.cpp/include/rag/dense/faiss_sidecar.hpp
+  rag.cpp/include/rag/dense/hnsw_sidecar.hpp
+  rag.cpp/include/rag/dense/index.hpp
+  rag.cpp/include/rag/dense/native_hnsw.hpp
+  rag.cpp/include/rag/dense/policy.hpp
+  rag.cpp/include/rag/dense/tiered_index.hpp
+  rag.cpp/include/rag/engine.hpp
+  rag.cpp/include/rag/ingestion/coordinator.hpp
+  rag.cpp/include/rag/ingestion/embedded_durability.hpp
+  rag.cpp/include/rag/ingestion/embedded_runtime.hpp
+  rag.cpp/include/rag/ingestion/job.hpp
+  rag.cpp/include/rag/ingestion/job_store.hpp
+  rag.cpp/include/rag/ingestion/postgres_job_store.hpp
+  rag.cpp/include/rag/ingestion/postgres_runtime.hpp
+  rag.cpp/include/rag/ingestion/runtime.hpp
+  rag.cpp/include/rag/migration/contract.hpp
+  rag.cpp/include/rag/migration/embedded_endpoint.hpp
+  rag.cpp/include/rag/migration/postgres_endpoint.hpp
+  rag.cpp/include/rag/preparation/document_preparer.hpp
+  rag.cpp/include/rag/retrieval/runtime.hpp
+  rag.cpp/src/backend/embedded_backend.cpp
+  rag.cpp/src/backend/candidate_backend.cpp
+  rag.cpp/src/backend/embedded_checkpoint.cpp
+  rag.cpp/src/backend/postgres_backend.cpp
+  rag.cpp/src/backend/postgres_config.cpp
+  rag.cpp/src/core/keys.cpp
+  rag.cpp/src/dense/cache_fingerprint.cpp
+  rag.cpp/src/dense/exact_sidecar.cpp
+  rag.cpp/src/dense/faiss_index.cpp
+  rag.cpp/src/dense/faiss_sidecar.cpp
+  rag.cpp/src/dense/hnsw_sidecar.cpp
+  rag.cpp/src/dense/index.cpp
+  rag.cpp/src/dense/native_hnsw.cpp
+  rag.cpp/src/dense/policy.cpp
+  rag.cpp/src/dense/tiered_index.cpp
+  rag.cpp/src/postgres/connection_pool.cpp
+  rag.cpp/src/postgres/connection_pool.hpp
+  rag.cpp/src/postgres/migrations.cpp
+  rag.cpp/src/postgres/migrations.hpp
+  rag.cpp/src/migration/contract.cpp
+  rag.cpp/src/migration/embedded_endpoint.cpp
+  rag.cpp/src/migration/postgres_endpoint.cpp
+  rag.cpp/src/store/container.cpp
+  rag.cpp/src/store/container_layout.cpp
+  rag.cpp/src/store/container_view.cpp
+  rag.cpp/src/ingestion/coordinator.cpp
+  rag.cpp/src/ingestion/embedded_durability.cpp
+  rag.cpp/src/ingestion/embedded_runtime.cpp
+  rag.cpp/src/ingestion/job.cpp
+  rag.cpp/src/ingestion/job_store.cpp
+  rag.cpp/src/ingestion/postgres_job_store.cpp
+  rag.cpp/src/ingestion/postgres_runtime.cpp
+  rag.cpp/src/preparation/document_preparer.cpp
+  rag.cpp/src/retrieval/runtime.cpp
   include/lrs/bridge.h
   include/lrs/config.hpp
   include/lrs/model_client.hpp
@@ -28,11 +99,24 @@ set(LRS_FORMAT_SOURCES
   src/model_client.cpp
   src/mobile.cpp
   src/service.cpp
+  tests/backend_contract_suite.cpp
+  tests/backend_contract_suite.hpp
   tests/tests.cpp
   tests/rag_core_tests.cpp
   tests/rag_integration_tests.cpp
   tools/mobile_smoke.cpp
+  tools/eval/common.cpp
+  tools/eval/common.hpp
+  tools/eval/corpus.cpp
+  tools/eval/corpus.hpp
+  tools/eval/dense.cpp
+  tools/eval/dense.hpp
+  tools/eval/qrels.cpp
+  tools/eval/qrels.hpp
+  tools/eval/runtime.cpp
+  tools/eval/runtime.hpp
   tools/rag_eval.cpp
+  tools/rag_migrate.cpp
   tools/spec_check.cpp)
 list(TRANSFORM LRS_FORMAT_SOURCES PREPEND "${CMAKE_SOURCE_DIR}/")
 
@@ -87,10 +171,11 @@ if(LRS_BUILD_COORDINATOR)
 
   add_library(lrs_core STATIC src/config.cpp src/service.cpp src/model_client.cpp)
   target_include_directories(lrs_core PUBLIC include PRIVATE
+    rag.cpp/include
     third_party/llama.cpp/vendor
     third_party/llama.cpp/vendor/cpp-httplib)
-  target_link_libraries(lrs_core PUBLIC lrs_bridge lrs_httplib)
-  target_compile_features(lrs_core PUBLIC cxx_std_17)
+  target_link_libraries(lrs_core PUBLIC lrs_bridge lrs_httplib PRIVATE rag::core)
+  target_compile_features(lrs_core PUBLIC cxx_std_17 PRIVATE cxx_std_20)
 
   add_executable(llama-rag-server src/main.cpp)
   target_include_directories(llama-rag-server PRIVATE third_party/llama.cpp/vendor)
@@ -129,14 +214,44 @@ if(LRS_BUILD_SPEC_CHECK)
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/libexec")
 endif()
 
-add_executable(lrs-rag-eval tools/rag_eval.cpp)
+add_executable(lrs-rag-eval
+  tools/rag_eval.cpp
+  tools/eval/common.cpp
+  tools/eval/corpus.cpp
+  tools/eval/dense.cpp
+  tools/eval/qrels.cpp
+  tools/eval/runtime.cpp)
+
 target_link_libraries(lrs-rag-eval PRIVATE rag::core)
 target_compile_features(lrs-rag-eval PRIVATE cxx_std_20)
 target_compile_definitions(lrs-rag-eval PRIVATE LRS_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 set_target_properties(lrs-rag-eval PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/libexec")
+if(LRS_BUILD_TESTS)
+  add_test(NAME lrs-eval-qrels COMMAND lrs-rag-eval qrels)
+  add_test(NAME lrs-eval-dense-smoke COMMAND lrs-rag-eval dense
+    --vectors 256 --dimension 32 --queries 5 --k 10
+    --implementation native --algorithm exact)
+  add_test(NAME lrs-eval-runtime-smoke COMMAND lrs-rag-eval runtime
+    --vectors 256 --dimension 32 --queries 5 --k 10
+    --implementation native --algorithm exact)
+endif()
+
+if(LRS_ENABLE_POSTGRES)
+  add_executable(lrs-rag-migrate tools/rag_migrate.cpp)
+  target_link_libraries(lrs-rag-migrate PRIVATE rag::core)
+  target_compile_features(lrs-rag-migrate PRIVATE cxx_std_20)
+  set_target_properties(lrs-rag-migrate PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+  if(LRS_BUILD_TESTS)
+    add_test(NAME lrs-migration-cli-help COMMAND lrs-rag-migrate --help)
+  endif()
+endif()
 
 set(LRS_WARNING_TARGETS lrs-rag-eval)
+if(LRS_ENABLE_POSTGRES)
+  list(APPEND LRS_WARNING_TARGETS lrs-rag-migrate)
+endif()
 if(LRS_BUILD_SPEC_CHECK)
   list(APPEND LRS_WARNING_TARGETS lrs-spec-check)
 endif()
@@ -161,10 +276,16 @@ foreach(t IN LISTS LRS_WARNING_TARGETS)
 endforeach()
 
 if(LRS_BUILD_TESTS)
-  add_executable(rag-core-tests tests/rag_core_tests.cpp)
+  add_executable(rag-core-tests
+    tests/rag_core_tests.cpp
+    tests/backend_contract_suite.cpp)
   target_link_libraries(rag-core-tests PRIVATE rag::core)
   target_compile_features(rag-core-tests PRIVATE cxx_std_20)
   target_compile_definitions(rag-core-tests PRIVATE LRS_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+  if(LRS_ENABLE_POSTGRES)
+    target_include_directories(rag-core-tests PRIVATE "${CMAKE_SOURCE_DIR}/rag.cpp/src")
+    target_link_libraries(rag-core-tests PRIVATE PostgreSQL::PostgreSQL)
+  endif()
   set_target_properties(rag-core-tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/libexec")
   add_test(NAME rag-owned-core-behavior COMMAND rag-core-tests)

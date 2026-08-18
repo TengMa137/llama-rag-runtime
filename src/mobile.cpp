@@ -1,11 +1,16 @@
 #include "lrs/mobile.h"
 
 #include <nlohmann/json.hpp>
+#include <rag/backend/embedded_backend.hpp>
+#include <rag/core/keys.hpp>
 #include <rag/dense/embedder.hpp>
 #include <rag/engine.hpp>
 #include <rag/pipeline/pipeline.hpp>
+#include <rag/preparation/document_preparer.hpp>
+#include <rag/retrieval/runtime.hpp>
 #include <rag/text/chunker.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -23,7 +28,8 @@
 
 struct lrs_mobile_index {
     std::string path;
-    std::shared_ptr<rag::Engine> engine;
+    std::shared_ptr<rag::backend::EmbeddedBackend> backend;
+    std::shared_ptr<rag::Engine> legacy;
     mutable std::mutex operation;
 };
 
@@ -43,40 +49,10 @@ int fail(char** error, const std::string& message) {
     return 1;
 }
 
-std::string normalize(std::string_view input) {
-    std::string output;
-    output.reserve(input.size());
-    for (std::size_t index = 0; index < input.size(); ++index) {
-        if (input[index] == '\r') {
-            if (index + 1 < input.size() && input[index + 1] == '\n') {
-                continue;
-            }
-            output.push_back('\n');
-        } else {
-            output.push_back(input[index]);
-        }
-    }
-    return output;
-}
-
-std::uint64_t fnv1a(std::string_view text, std::uint64_t hash = 1469598103934665603ULL) {
-    for (const unsigned char character : text) {
-        hash ^= character;
-        hash *= 1099511628211ULL;
-    }
-    return hash;
-}
-
 std::string public_chunk_id(const rag::SearchResult& hit) {
-    const std::string identity = hit.uri + "\n" + std::to_string(hit.start_line) + ":" +
-                                 std::to_string(hit.end_line) + "\n" + normalize(hit.text);
-    const auto hash = fnv1a(identity);
-    static constexpr char digits[] = "0123456789abcdef";
-    std::string encoded(16, '0');
-    for (int index = 15; index >= 0; --index) {
-        encoded[static_cast<std::size_t>(index)] = digits[(hash >> ((15 - index) * 4)) & 0xf];
-    }
-    return "chk_" + encoded;
+    return hit.chunk_key.empty()
+               ? rag::stable_chunk_key(hit.uri, hit.start_line, hit.end_line, hit.text)
+               : hit.chunk_key;
 }
 
 rag::index::CorpusConfig corpus_config() {
@@ -94,8 +70,15 @@ rag::index::CorpusConfig corpus_config() {
     return config;
 }
 
+rag::preparation::PrepareOptions preparation_options() {
+    rag::preparation::PrepareOptions options;
+    options.chunking = corpus_config().chunk;
+    return options;
+}
+
 std::vector<rag::Chunk> chunk_document(const std::string& content) {
-    return rag::text::chunk_document(rag::DocId{0}, normalize(content), corpus_config().chunk);
+    return rag::text::chunk_document(rag::DocId{0}, rag::normalize_source_text(content),
+                                     corpus_config().chunk);
 }
 
 rag::Vector normalized_vector(const float* values, std::size_t dimension) {
@@ -202,6 +185,30 @@ void publish(const std::string& path, const std::shared_ptr<rag::Engine>& candid
     std::filesystem::rename(staging, database);
 }
 
+void publish(const std::string& path, rag::backend::EmbeddedBackend& backend) {
+    const std::filesystem::path database(path);
+    if (database.has_parent_path())
+        std::filesystem::create_directories(database.parent_path());
+    auto saved = backend.checkpoint(path, 0);
+    if (!saved)
+        throw std::runtime_error(saved.error().message);
+}
+
+void require_portable_mode(const rag::backend::EmbeddedBackend& backend, bool vectors,
+                           std::size_t dimension = 0) {
+    const auto stats = backend.stats();
+    if (!stats)
+        throw std::runtime_error(stats.error().message);
+    if (stats->live_chunks == 0)
+        return;
+    if (vectors && stats->embedding_dimension == 0)
+        throw std::runtime_error("cannot add vectors to an index containing lexical-only chunks");
+    if (!vectors && stats->embedding_dimension != 0)
+        throw std::runtime_error("cannot mix lexical-only documents into a vector index");
+    if (vectors && stats->embedding_dimension != dimension)
+        throw std::runtime_error("embedding dimension does not match the persisted index");
+}
+
 nlohmann::json search_results(const std::vector<rag::SearchResult>& results) {
     nlohmann::json body;
     body["results"] = nlohmann::json::array();
@@ -230,7 +237,16 @@ extern "C" int lrs_mobile_open(const char* database_path, lrs_mobile_index** out
     try {
         auto index = std::make_unique<lrs_mobile_index>();
         index->path = database_path;
-        index->engine = load_engine(index->path);
+        if (std::filesystem::exists(index->path)) {
+            auto portable = rag::backend::EmbeddedBackend::open_checkpoint(index->path);
+            if (portable)
+                index->backend =
+                    std::shared_ptr<rag::backend::EmbeddedBackend>(std::move(*portable));
+            else
+                index->legacy = load_engine(index->path);
+        } else {
+            index->backend = std::make_shared<rag::backend::EmbeddedBackend>();
+        }
         *out = index.release();
         return 0;
     } catch (const std::exception& exception) {
@@ -285,11 +301,32 @@ extern "C" int lrs_mobile_upsert_lexical(lrs_mobile_index* index, const char* do
     }
     try {
         std::lock_guard lock(index->operation);
+        if (index->backend) {
+            require_portable_mode(*index->backend, false);
+            auto prepared = rag::preparation::prepare_document(document_id, content, {}, title,
+                                                               preparation_options(), nullptr);
+            if (!prepared)
+                throw std::runtime_error(prepared.error().message);
+            auto state = index->backend->document_state(document_id);
+            if (!state)
+                throw std::runtime_error(state.error().message);
+            if (*state && (*state)->content_hash == prepared->content_hash) {
+                *unchanged = 1;
+                return 0;
+            }
+            const auto revision = *state ? (*state)->revision + 1 : 1;
+            auto activated = index->backend->activate(std::move(*prepared), revision);
+            if (!activated)
+                throw std::runtime_error(activated.error().message);
+            publish(index->path, *index->backend);
+            *unchanged = 0;
+            return 0;
+        }
         auto candidate = load_engine(index->path);
         if (has_embeddings(*candidate)) {
             throw std::runtime_error("cannot mix lexical-only documents into a vector index");
         }
-        const std::string normalized = normalize(content);
+        const std::string normalized = rag::normalize_source_text(content);
         if (const auto id = candidate->corpus().find_by_uri(document_id)) {
             const auto* existing = candidate->corpus().document(*id);
             if (existing != nullptr && existing->text == normalized && existing->title == title) {
@@ -306,7 +343,7 @@ extern "C" int lrs_mobile_upsert_lexical(lrs_mobile_index* index, const char* do
             throw std::runtime_error(built.error().message);
         }
         publish(index->path, candidate);
-        index->engine = std::move(candidate);
+        index->legacy = std::move(candidate);
         *unchanged = 0;
         return 0;
     } catch (const std::exception& exception) {
@@ -332,10 +369,39 @@ extern "C" int lrs_mobile_upsert_vectors(lrs_mobile_index* index, const char* do
     }
     try {
         std::lock_guard lock(index->operation);
-        const std::string normalized = normalize(content);
+        const std::string normalized = rag::normalize_source_text(content);
         const auto chunks = chunk_document(normalized);
         if (chunks.size() != embedding_count) {
             throw std::runtime_error("embedding count does not match prepared chunk count");
+        }
+
+        if (index->backend) {
+            require_portable_mode(*index->backend, true, embedding_dimension);
+            auto prepared = rag::preparation::prepare_chunks(document_id, normalized, {}, title,
+                                                             preparation_options().chunking);
+            if (!prepared)
+                throw std::runtime_error(prepared.error().message);
+            if (prepared->chunks.size() != embedding_count)
+                throw std::runtime_error("embedding count does not match prepared chunk count");
+            prepared->embedding_identity =
+                "lrs-precomputed-f32-v1:" + std::to_string(embedding_dimension);
+            for (std::size_t position = 0; position < prepared->chunks.size(); ++position)
+                prepared->chunks[position].embedding = normalized_vector(
+                    embeddings + position * embedding_dimension, embedding_dimension);
+            auto state = index->backend->document_state(document_id);
+            if (!state)
+                throw std::runtime_error(state.error().message);
+            if (*state && (*state)->content_hash == prepared->content_hash) {
+                *unchanged = 1;
+                return 0;
+            }
+            const auto revision = *state ? (*state)->revision + 1 : 1;
+            auto activated = index->backend->activate(std::move(*prepared), revision);
+            if (!activated)
+                throw std::runtime_error(activated.error().message);
+            publish(index->path, *index->backend);
+            *unchanged = 0;
+            return 0;
         }
 
         auto candidate = load_engine(index->path);
@@ -364,7 +430,7 @@ extern "C" int lrs_mobile_upsert_vectors(lrs_mobile_index* index, const char* do
             throw std::runtime_error(built.error().message);
         }
         publish(index->path, candidate);
-        index->engine = std::move(candidate);
+        index->legacy = std::move(candidate);
         *unchanged = 0;
         return 0;
     } catch (const std::exception& exception) {
@@ -390,9 +456,34 @@ extern "C" int lrs_mobile_search_json(lrs_mobile_index* index, const char* query
         std::lock_guard lock(index->operation);
         std::vector<rag::SearchResult> results;
         const std::string selected(mode);
+        if (index->backend) {
+            rag::backend::SearchRequest request;
+            request.query = query;
+            request.top_k = top_k;
+            request.candidate_pool = std::max<std::size_t>(top_k * 6, 60);
+            if (selected == "lexical") {
+                request.mode = rag::backend::SearchMode::lexical;
+            } else {
+                if (selected != "dense" && selected != "hybrid")
+                    throw std::runtime_error("mode must be lexical, dense, or hybrid");
+                if (query_embedding == nullptr || embedding_dimension == 0)
+                    throw std::runtime_error("dense and hybrid search require a query embedding");
+                require_portable_mode(*index->backend, true, embedding_dimension);
+                request.mode = selected == "dense" ? rag::backend::SearchMode::dense
+                                                   : rag::backend::SearchMode::hybrid;
+                request.embedding = normalized_vector(query_embedding, embedding_dimension);
+            }
+            auto found = rag::retrieval::search(*index->backend, request);
+            if (!found)
+                throw std::runtime_error(found.error().message);
+            *json = copy_string(search_results(*found).dump());
+            if (*json == nullptr)
+                return fail(error, "allocation failed");
+            return 0;
+        }
         if (selected == "lexical") {
-            for (const auto& hit : index->engine->corpus().lexical_search(query, top_k)) {
-                results.push_back(index->engine->corpus().resolve(hit));
+            for (const auto& hit : index->legacy->corpus().lexical_search(query, top_k)) {
+                results.push_back(index->legacy->corpus().resolve(hit));
             }
         } else {
             if (selected != "dense" && selected != "hybrid") {
@@ -401,29 +492,29 @@ extern "C" int lrs_mobile_search_json(lrs_mobile_index* index, const char* query
             if (query_embedding == nullptr || embedding_dimension == 0) {
                 throw std::runtime_error("dense and hybrid search require a query embedding");
             }
-            require_vector_compatible(*index->engine, embedding_dimension);
+            require_vector_compatible(*index->legacy, embedding_dimension);
             std::unordered_map<std::string, rag::Vector> prepared;
             prepared.emplace(query, normalized_vector(query_embedding, embedding_dimension));
-            index->engine->with_embedder(rag::dense::AnyEmbedder(
+            index->legacy->with_embedder(rag::dense::AnyEmbedder(
                 PreparedEmbedder(embedding_dimension, std::move(prepared))));
             if (selected == "dense") {
-                auto hits = index->engine->corpus().dense_search(query, top_k);
+                auto hits = index->legacy->corpus().dense_search(query, top_k);
                 if (!hits) {
                     throw std::runtime_error(hits.error().message);
                 }
                 for (const auto& hit : *hits) {
-                    results.push_back(index->engine->corpus().resolve(hit));
+                    results.push_back(index->legacy->corpus().resolve(hit));
                 }
             } else {
                 rag::pipeline::HybridRetrieveConfig config;
                 config.fusion = rag::pipeline::HybridRetrieveConfig::Fusion::rrf;
                 auto pipeline = rag::pipeline::Pipeline::standard_with(config);
-                auto hits = pipeline.run(index->engine->corpus(), query, top_k);
+                auto hits = pipeline.run(index->legacy->corpus(), query, top_k);
                 if (!hits) {
                     throw std::runtime_error(hits.error().message);
                 }
                 for (const auto& hit : *hits) {
-                    results.push_back(index->engine->corpus().resolve(hit));
+                    results.push_back(index->legacy->corpus().resolve(hit));
                 }
             }
         }

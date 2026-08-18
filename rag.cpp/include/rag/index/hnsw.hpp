@@ -189,8 +189,15 @@ class HnswIndex {
                                                    const AllowFn& allow,
                                                    float ef_boost = 4.0f) const;
 
+    // Correctness fallback for highly selective filters. Scans the one exact
+    // float representation owned by this graph; unavailable when drop_floats
+    // was explicitly selected.
+    [[nodiscard]] std::vector<Hit> search_exact_filtered(std::span<const float> query,
+                                                         std::size_t k, const AllowFn& allow) const;
+
     [[nodiscard]] std::size_t size() const noexcept { return nodes_.size(); }
     [[nodiscard]] std::size_t dimension() const noexcept { return dim_; }
+    [[nodiscard]] bool has_sequential_live_ids() const noexcept;
 
     // Bytes of heap actually held by the index, broken down by component.
     // Reported rather than inferred: process RSS cannot measure a release (the

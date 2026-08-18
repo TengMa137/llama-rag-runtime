@@ -1,0 +1,112 @@
+{
+  "object": "rag.evaluation_baseline",
+  "version": 1,
+  "recorded_at": "2026-08-12",
+  "environment": {
+    "architecture": "arm64",
+    "os": "macOS 26.5.2 (25F84)",
+    "compiler": "Apple clang 21.0.0",
+    "build_type": "Release",
+    "faiss": "Homebrew installed package"
+  },
+  "corpus": {
+    "generator": "xorshift64star-unit-v1",
+    "seed": 7814435183056219185,
+    "dimension": 384,
+    "normalization": "unit-l2-f32"
+  },
+  "native_baselines": [
+    {
+      "vectors": 25000,
+      "algorithm": "exact",
+      "build_ms": 12.4675,
+      "recall_at_10": 1.0,
+      "overlap_at_10": 1.0,
+      "filtered_recall_at_10": 1.0,
+      "query_latency_ms": {"p50": 0.627312, "p95": 0.65027705},
+      "dense_resident_bytes": 38950000,
+      "process_rss_bytes": 127631360
+    },
+    {
+      "vectors": 25000,
+      "algorithm": "hnsw",
+      "build_ms": 2442.493875,
+      "recall_at_10": 1.0,
+      "overlap_at_10": 0.952,
+      "filtered_recall_at_10": 1.0,
+      "query_latency_ms": {"p50": 2.0572085, "p95": 2.3245357},
+      "dense_resident_bytes": 44052700,
+      "process_rss_bytes": 142409728
+    },
+    {
+      "vectors": 100000,
+      "algorithm": "exact",
+      "build_ms": 46.418292,
+      "recall_at_10": 1.0,
+      "overlap_at_10": 1.0,
+      "filtered_recall_at_10": 1.0,
+      "query_latency_ms": {"p50": 2.4377705, "p95": 2.49983155},
+      "dense_resident_bytes": 155800000,
+      "process_rss_bytes": 501252096
+    },
+    {
+      "vectors": 100000,
+      "algorithm": "hnsw",
+      "build_ms": 15793.542333,
+      "recall_at_10": 1.0,
+      "overlap_at_10": 0.697,
+      "filtered_recall_at_10": 1.0,
+      "query_latency_ms": {"p50": 3.204188, "p95": 3.35876605},
+      "dense_resident_bytes": 176214180,
+      "process_rss_bytes": 552763392
+    },
+    {
+      "vectors": 500000,
+      "algorithm": "exact",
+      "build_ms": 344.010041,
+      "recall_at_10": 1.0,
+      "overlap_at_10": 1.0,
+      "filtered_recall_at_10": 1.0,
+      "query_latency_ms": {"p50": 12.6752295, "p95": 12.8585399},
+      "dense_resident_bytes": 779000000,
+      "process_rss_bytes": 2495578112
+    },
+    {
+      "vectors": 500000,
+      "algorithm": "hnsw",
+      "build_ms": 107234.05125,
+      "recall_at_10": 1.0,
+      "overlap_at_10": 0.356,
+      "filtered_recall_at_10": 1.0,
+      "query_latency_ms": {"p50": 3.7005625, "p95": 4.09880415},
+      "dense_resident_bytes": 885122216,
+      "process_rss_bytes": 2545762304
+    }
+  ],
+  "quality_gates_100k": [
+    {"implementation": "native", "algorithm": "exact", "required_recall_at_10": 1.0, "recall_at_10": 1.0, "overlap_at_10": 1.0, "filtered_recall_at_10": 1.0},
+    {"implementation": "native", "algorithm": "hnsw", "required_recall_at_10": 0.95, "recall_at_10": 1.0, "overlap_at_10": 0.697, "filtered_recall_at_10": 1.0},
+    {"implementation": "faiss", "algorithm": "flat", "required_recall_at_10": 1.0, "recall_at_10": 1.0, "overlap_at_10": 1.0, "filtered_recall_at_10": 1.0},
+    {"implementation": "faiss", "algorithm": "hnsw", "required_recall_at_10": 0.95, "recall_at_10": 1.0, "overlap_at_10": 0.681, "filtered_recall_at_10": 1.0},
+    {"implementation": "faiss", "algorithm": "ivf-sq8", "required_recall_at_10": 0.93, "recall_at_10": 1.0, "overlap_at_10": 0.982, "filtered_recall_at_10": 1.0},
+    {"implementation": "faiss", "algorithm": "ivf-pq", "required_recall_at_10": 0.9, "recall_at_10": 1.0, "overlap_at_10": 0.141, "filtered_recall_at_10": 1.0}
+  ],
+  "runtime_100k_native_hnsw": {
+    "delta_levels": [
+      {"percent": 0, "query_latency_ms": {"p50": 1.2165205, "p95": 1.3163357}, "p50_overhead_ratio": 1.0, "update_to_search_ms": 1.35},
+      {"percent": 5, "query_latency_ms": {"p50": 1.6104165, "p95": 1.77920355}, "p50_overhead_ratio": 1.323789036, "update_to_search_ms": 5.038458},
+      {"percent": 10, "query_latency_ms": {"p50": 1.8919165, "p95": 1.9672059}, "p50_overhead_ratio": 1.555186698, "update_to_search_ms": 7.967334}
+    ],
+    "compaction": {
+      "duration_ms": 18124.799959,
+      "peak_process_rss_bytes": 632799232,
+      "queries_served": 2604,
+      "query_failures": 0
+    }
+  },
+  "notes": [
+    "Recall@10 is the fraction of queries whose exact nearest neighbor appears in the candidate top ten.",
+    "Overlap@10 reports complete top-ten agreement with the native exact oracle and is descriptive for approximate policies.",
+    "Filtered recall uses a deterministic 101-ID allowed subset and requires a complete valid top-k."
+  ]
+}

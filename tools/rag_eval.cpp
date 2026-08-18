@@ -1,74 +1,144 @@
-#include <rag/engine.hpp>
-
-#include <cmath>
+#include <charconv>
 #include <fstream>
 #include <iostream>
-#include <nlohmann/json.hpp>
-#include <set>
+#include <map>
 #include <string>
+#include <string_view>
+
+#include <nlohmann/json.hpp>
+
+#include <rag/dense/policy.hpp>
+
+#include "eval/dense.hpp"
+#include "eval/qrels.hpp"
+#include "eval/runtime.hpp"
+
+namespace {
+
+constexpr std::string_view usage =
+    "Usage:\n"
+    "  lrs-rag-eval qrels [PATH]\n"
+    "  lrs-rag-eval manifest [PATH]\n"
+    "  lrs-rag-eval dense [--vectors N] [--dimension N] [--queries N] [--k N]\n"
+    "                     [--implementation native|faiss]\n"
+    "                     [--algorithm exact|hnsw|flat|ivf-sq8|ivf-pq]\n"
+    "                     [--seed N] [--enforce-gate]\n"
+    "  lrs-rag-eval runtime [the same sizing and native policy options]\n";
+
+template <class Integer> bool parse_integer(std::string_view value, Integer& output) {
+    const auto parsed = std::from_chars(value.data(), value.data() + value.size(), output);
+    return parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size();
+}
+
+int failure(const rag::Error& error) {
+    std::cerr << nlohmann::json{{"object", "rag.evaluation_error"},
+                                {"code", rag::to_string(error.code)},
+                                {"message", error.message}}
+                     .dump()
+              << '\n';
+    return 1;
+}
+
+} // namespace
 
 int main(int argc, char** argv) {
-    try {
-        const std::string path =
-            argc > 1 ? argv[1] : std::string(LRS_SOURCE_DIR) + "/tests/fixtures/qrels.json";
-        std::ifstream input(path);
-        if (!input)
-            throw std::runtime_error("cannot open " + path);
-        nlohmann::json fixture;
-        input >> fixture;
-
-        rag::Engine engine;
-        for (const auto& doc : fixture.at("documents")) {
-            auto added = engine.add(doc.at("id"), doc.at("text"), {}, doc.value("title", ""));
-            if (!added)
-                throw std::runtime_error(added.error().message);
-        }
-        if (auto built = engine.build(); !built)
-            throw std::runtime_error(built.error().message);
-
-        nlohmann::json report;
-        for (const auto profile :
-             {rag::retrieval::Profile::efficiency, rag::retrieval::Profile::balanced,
-              rag::retrieval::Profile::quality}) {
-            double recall = 0.0, mrr = 0.0, ndcg = 0.0;
-            for (const auto& query : fixture.at("queries")) {
-                const std::set<std::string> relevant(query.at("relevant").begin(),
-                                                     query.at("relevant").end());
-                rag::retrieval::SearchOptions options;
-                options.profile = profile;
-                options.top_k = fixture.value("k", 5U);
-                const auto results =
-                    engine.search(query.at("text").get<std::string>(), options, nullptr);
-                if (!results)
-                    throw std::runtime_error(results.error().message);
-                std::size_t found = 0;
-                double dcg = 0.0;
-                double reciprocal_rank = 0.0;
-                for (std::size_t i = 0; i < results->size(); ++i) {
-                    if (!relevant.contains((*results)[i].uri))
-                        continue;
-                    ++found;
-                    if (reciprocal_rank == 0.0)
-                        reciprocal_rank = 1.0 / static_cast<double>(i + 1);
-                    dcg += 1.0 / std::log2(static_cast<double>(i + 2));
-                }
-                recall += relevant.empty()
-                              ? 1.0
-                              : static_cast<double>(found) / static_cast<double>(relevant.size());
-                mrr += reciprocal_rank;
-                double ideal = 0.0;
-                for (std::size_t i = 0; i < std::min(relevant.size(), options.top_k); ++i)
-                    ideal += 1.0 / std::log2(static_cast<double>(i + 2));
-                ndcg += ideal == 0.0 ? 1.0 : dcg / ideal;
-            }
-            const double count = static_cast<double>(fixture.at("queries").size());
-            report[rag::retrieval::name(profile)] = {
-                {"recall_at_k", recall / count}, {"mrr", mrr / count}, {"ndcg_at_k", ndcg / count}};
-        }
-        std::cout << report.dump(2) << '\n';
+    const std::string command = argc > 1 ? argv[1] : "qrels";
+    if (command == "--help") {
+        std::cout << usage;
         return 0;
-    } catch (const std::exception& error) {
-        std::cerr << "lrs-rag-eval: " << error.what() << '\n';
+    }
+    if (command == "manifest") {
+        const std::string report = lrs::eval::corpus_manifest().dump(2) + "\n";
+        if (argc > 2) {
+            std::ofstream output(argv[2], std::ios::binary | std::ios::trunc);
+            if (!output) {
+                std::cerr << "cannot write corpus manifest\n";
+                return 1;
+            }
+            output << report;
+        }
+        std::cout << report;
+        return 0;
+    }
+    if (command == "qrels") {
+        const std::string path =
+            argc > 2 ? argv[2] : std::string(LRS_SOURCE_DIR) + "/tests/fixtures/qrels.json";
+        auto report = lrs::eval::run_qrels(path);
+        if (!report)
+            return failure(report.error());
+        std::cout << report->dump(2) << '\n';
+        return 0;
+    }
+    if (command != "dense" && command != "runtime") {
+        std::cerr << usage;
         return 1;
     }
+
+    lrs::eval::DenseOptions options;
+    std::string implementation = "native";
+    std::string algorithm = "exact";
+    for (int index = 2; index < argc; ++index) {
+        const std::string option = argv[index];
+        if (option == "--enforce-gate") {
+            options.enforce_gate = true;
+            continue;
+        }
+        if (++index >= argc) {
+            std::cerr << usage;
+            return 1;
+        }
+        const std::string_view value = argv[index];
+        if (option == "--implementation")
+            implementation = value;
+        else if (option == "--algorithm")
+            algorithm = value;
+        else if (option == "--vectors") {
+            if (!parse_integer(value, options.vectors))
+                return 1;
+        } else if (option == "--dimension") {
+            if (!parse_integer(value, options.dimension))
+                return 1;
+        } else if (option == "--queries") {
+            if (!parse_integer(value, options.queries))
+                return 1;
+        } else if (option == "--k") {
+            if (!parse_integer(value, options.k))
+                return 1;
+        } else if (option == "--seed") {
+            if (!parse_integer(value, options.seed))
+                return 1;
+        } else {
+            std::cerr << usage;
+            return 1;
+        }
+    }
+    auto parsed_implementation = rag::dense::parse_dense_implementation(implementation);
+    auto parsed_algorithm = rag::dense::parse_dense_algorithm(algorithm);
+    if (!parsed_implementation)
+        return failure(parsed_implementation.error());
+    if (!parsed_algorithm)
+        return failure(parsed_algorithm.error());
+    options.policy.implementation = *parsed_implementation;
+    options.policy.algorithm = *parsed_algorithm;
+    if (options.policy.algorithm == rag::dense::DenseAlgorithm::hnsw) {
+        options.policy.hnsw.ef_search = 160;
+        options.policy.faiss.ef_search = 160;
+    }
+    if (options.policy.algorithm == rag::dense::DenseAlgorithm::ivf_sq8 ||
+        options.policy.algorithm == rag::dense::DenseAlgorithm::ivf_pq) {
+        options.policy.faiss.ivf_lists = 256;
+        options.policy.faiss.ivf_probes = 256;
+        options.policy.faiss.minimum_training_vectors_per_list = 39;
+        options.policy.faiss.pq_subquantizers = 32;
+        options.policy.faiss.pq_bits = 8;
+    }
+    rag::Result<nlohmann::json> report =
+        command == "dense"
+            ? lrs::eval::run_dense(options)
+            : lrs::eval::run_runtime({options.vectors, options.dimension, options.queries,
+                                      options.k, options.seed, options.policy});
+    if (!report)
+        return failure(report.error());
+    std::cout << report->dump(2) << '\n';
+    return 0;
 }

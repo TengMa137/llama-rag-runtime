@@ -32,6 +32,7 @@ CRC, and not overlap. Unknown tags are skipped. `META`, `DOCS`, `CHNK`, and
 | `BM25` | `0x35324D42` | versioned inverted-index blob |
 | `HNSW` | `0x57534E48` | versioned ANN blob |
 | `TOMB` | `0x424D4F54` | deleted document IDs |
+| `RTME` | `0x454D5452` | optional portable-runtime revisions and public IDs |
 
 CRC32 uses the reflected IEEE polynomial `0xEDB88320`, initial value
 `0xFFFFFFFF`, and final XOR `0xFFFFFFFF`. It detects accidental corruption; it
@@ -54,12 +55,26 @@ EMBD := chunk_count × { u32 dimension, f32[dimension] values }
         dimension 0 means that chunk has no vector
 
 TOMB := u32 count, count × u32 document_id
+
+RTME := u32 version, u64 generation, u64 represented_wal_position,
+        u32 active_document_count,
+        active_document_count × {
+          str document_key, u64 revision, str content_hash,
+          str chunking_fingerprint, str embedding_identity,
+          u32 chunk_count,
+          chunk_count × { str public_chunk_key, u64 ordinal, str indexed_text }
+        },
+        u32 revision_count, revision_count × { str document_key, u64 revision }
 ```
 
 Document and chunk IDs equal record ordinals. Chunk document IDs and tombstones
 must reference existing documents. Embeddings are in chunk order, have one
 nonzero dimension across the file, contain only finite values, and have unit
 norm. `TOMB` first appeared in minor 1 and is omitted when empty.
+`RTME` is emitted by the backend-neutral embedded runtime. Its active rows map
+the ordinary `DOCS`/`CHNK`/`EMBD` sections to stable public identities, while
+the revision catalog also retains deletion revisions. Legacy v1.2 readers skip
+this additive section and can still open the standard sections.
 
 `META` stores `hnsw_threshold`, `embed_batch`, BM25 parameters, chunk geometry,
 and the embedding/chunking policy. Minor 2 added policy identity and fingerprint
@@ -76,5 +91,33 @@ migration path; none is currently planned.
 
 Saving writes and flushes a temporary file in the destination directory, then
 atomically renames and syncs the directory. WAL data is a separate framed file,
-not a `.ragdb` section; replay accepts a torn final frame but rejects corruption
-inside acknowledged history.
+not a `.ragdb` section; `RTME` records the exact WAL prefix represented by its
+checkpoint. Replay accepts a torn final frame but rejects corruption inside
+acknowledged history.
+
+Mapped readers validate the complete container layout before exposing any
+payload. A mapped section view is non-owning and must not outlive its reader.
+Atomic replacement leaves existing views bound to the old inode, so publishing
+a generation cannot invalidate concurrent readers.
+
+Files ending in `.dense.native-exact-v1` are disposable cache sidecars, not
+durable `.ragdb` generations. They reuse the CRC-protected section container but
+are accepted only when their embedded implementation, algorithm, corpus/vector
+fingerprint, row count, dimension, keys, and normalized vectors match the active
+checkpoint. Deleting or corrupting a sidecar must only cause deterministic
+rebuild; it cannot remove or change indexed documents.
+
+The corresponding native HNSW cache ends in `.dense.native-hnsw-v1`. It stores
+the validated stable-key catalog and serialized graph under the same
+generation/vector fingerprint rules, extended with HNSW construction/search
+parameters. It is accepted only when numeric graph IDs are the sequential row
+IDs for that key catalog and the graph contains one f32 matrix with no SQ8/PQ
+mirror. It has the same delete-or-rebuild semantics as the exact sidecar.
+
+Optional FAISS caches end in `.dense.faiss-<algorithm>-v1`, where algorithm is
+`flat`, `hnsw`, `ivf-sq8`, or `ivf-pq`. They reuse the validated container with
+`META`, ordered `CHNK` keys, and an opaque `DIDX` serialized-index section. The
+fingerprint includes the FAISS implementation version, explicit construction
+and search parameters, embedding identity, key order, and vector bytes. They
+are never authoritative: incompatible, missing, truncated, or CRC-invalid
+files are rebuilt from normalized vectors in the portable `.ragdb` checkpoint.

@@ -1292,9 +1292,9 @@ Returns retrieval results without answer generation.
   "query": "How is the local index persisted?",
   "top_k": 8,
   "mode": "hybrid",
-  "filters": {
+  "filter": {
     "language": "en",
-    "version": {"gte": "1.0"}
+    "audience": "all"
   },
   "include_content": true,
   "include_scores": true
@@ -1315,18 +1315,11 @@ Returns retrieval results without answer generation.
       "document_id": "architecture/storage",
       "chunk_id": "architecture/storage#3:91aa7b21",
       "title": "Storage",
-      "uri": "docs://architecture/storage",
-      "content": "...",
-      "metadata": {"language": "en"},
-      "offsets": {
-        "start_line": 88,
-        "end_line": 112
-      },
-      "scores": {
-        "lexical": 4.212,
-        "dense": 0.781,
-        "fused": 0.0294
-      }
+      "metadata": {"language": "en", "audience": "all"},
+      "text": "...",
+      "start_line": 88,
+      "end_line": 112,
+      "score": 0.0294
     }
   ],
   "timing_ms": {
@@ -1339,6 +1332,10 @@ Returns retrieval results without answer generation.
   }
 }
 ```
+
+Filter values are strings. Clauses use exact equality, are combined with AND,
+and are enforced by lexical, dense, and hybrid retrieval. Scores are opaque,
+mode-specific ranking values.
 
 ---
 
@@ -1358,7 +1355,7 @@ Runs retrieval, builds grounded context, and generates an answer.
   "retrieval": {
     "top_k": 8,
     "mode": "hybrid",
-    "filters": {"language": "en"}
+    "filter": {"language": "en"}
   },
   "generation": {
     "max_tokens": 600,
@@ -2478,7 +2475,8 @@ The command remains one generation server. The draft context is internal and is 
 - [ ] Benchmark retrieval recall and latency.
 - [ ] Benchmark generation baseline before enabling MTP.
 - [ ] Benchmark MTP/draft acceptance, throughput, and memory where supported.
-- [ ] Verify authentication and CORS on every public custom route.
+- [x] Verify shared-secret authentication on every coordinator route.
+- [ ] Verify explicit CORS policy on every public custom route.
 - [ ] Verify private model ports bind only to loopback or a protected transport.
 - [ ] Verify no document content appears in default logs.
 - [ ] Package notices and licenses.

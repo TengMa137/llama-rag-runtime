@@ -29,7 +29,10 @@ Result<Context> HybridRetrieveStage::process(Context ctx) const {
     std::vector<Hit> lex;
     Result<std::vector<Hit>> dense = std::vector<Hit>{};
 
-    auto do_lexical = [&] { lex = corpus.lexical_search(ctx.query, cfg_.candidate_k); };
+    auto do_lexical = [&] {
+        lex = ctx.filter ? corpus.lexical_search(ctx.query, cfg_.candidate_k, ctx.filter)
+                         : corpus.lexical_search(ctx.query, cfg_.candidate_k);
+    };
     auto do_dense = [&] {
         // The metadata filter is pushed into the ANN walk as a PRE-filter so a
         // selective predicate still returns a full candidate pool.

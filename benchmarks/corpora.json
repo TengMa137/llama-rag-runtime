@@ -1,0 +1,10 @@
+{
+  "object": "rag.evaluation_corpus_manifest",
+  "version": 1,
+  "generator": "xorshift64star-unit-v1",
+  "seed": 7814435183056219185,
+  "dimension": 384,
+  "sizes": [25000, 100000, 500000],
+  "key_format": "chk_eval_<zero-padded-row>",
+  "normalization": "unit-l2-f32"
+}

@@ -226,6 +226,8 @@ files remains an external setup step; no Hugging Face token is committed.
 
 The mobile bridge currently supports open/create, document chunk preparation,
 lexical upsert, vector upsert, lexical/dense/hybrid search, persistence/reopen,
-and close. It does not yet expose delete, list, metadata filters, statistics,
-compaction, or a complete RAG answer endpoint. Those are application or future
-bridge work, not hidden capabilities.
+and close. New indexes use monotonic revisions, the exact dense delta, and
+atomic portable checkpoints; existing legacy v1.2 indexes remain readable via
+the compatibility path. The ABI does not yet expose delete, list, metadata
+filters, statistics, compaction, or a complete RAG answer endpoint. Those are
+application or future bridge work, not hidden capabilities.

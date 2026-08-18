@@ -759,6 +759,15 @@ void HnswIndex::ensure_id_index() {
 void HnswIndex::remove(std::uint32_t id) { deleted_.insert(id); }
 bool HnswIndex::is_deleted(std::uint32_t id) const noexcept { return deleted_.count(id) != 0; }
 
+bool HnswIndex::has_sequential_live_ids() const noexcept {
+    if (!deleted_.empty())
+        return false;
+    for (std::size_t index = 0; index < nodes_.size(); ++index)
+        if (nodes_[index].superseded || nodes_[index].id != index)
+            return false;
+    return true;
+}
+
 void HnswIndex::compact() {
     // Superseded nodes are garbage too — stale vectors of ids that were re-added
     // — so compaction must be able to run for them even with no tombstones.
@@ -867,6 +876,32 @@ std::vector<Hit> HnswIndex::search_filtered(std::span<const float> query, std::s
     return hits;
 }
 
+std::vector<Hit> HnswIndex::search_exact_filtered(std::span<const float> query, std::size_t k,
+                                                  const AllowFn& allow) const {
+    if (k == 0 || nodes_.empty() || dim_ == 0 || store_.empty() || query.size() != dim_)
+        return {};
+    std::vector<float> normalized_query(query.begin(), query.end());
+    dense::normalize(normalized_query);
+    std::vector<Hit> hits;
+    hits.reserve(std::min(k, nodes_.size()));
+    for (std::size_t node = 0; node < nodes_.size(); ++node) {
+        const auto id = nodes_[node].id;
+        if ((allow && !allow(id)) || deleted_.contains(id) || nodes_[node].superseded)
+            continue;
+        hits.push_back(Hit{ChunkId{id}, Score{dense::dot(vec_at(node), normalized_query)}});
+    }
+    const auto order = [](const Hit& left, const Hit& right) {
+        if (left.score != right.score)
+            return left.score.get() > right.score.get();
+        return left.chunk.get() < right.chunk.get();
+    };
+    const auto wanted = std::min(k, hits.size());
+    std::partial_sort(hits.begin(), hits.begin() + static_cast<std::ptrdiff_t>(wanted), hits.end(),
+                      order);
+    hits.resize(wanted);
+    return hits;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Serialization
 // ─────────────────────────────────────────────────────────────────────────────
@@ -930,7 +965,8 @@ std::string HnswIndex::serialize() const {
     // adjacency only in CSR form, so materialize it first. Cheap relative to
     // writing the blob, and it keeps the format independent of which internal
     // representation happens to be live.
-    if (sealed_)
+    const bool restore_sealed_layout = sealed_;
+    if (restore_sealed_layout)
         unpack_links();
 
     std::string o;
@@ -975,6 +1011,11 @@ std::string HnswIndex::serialize() const {
                      layer.size() * sizeof(std::uint32_t));
         }
     }
+    if (restore_sealed_layout)
+        for (auto& node : nodes_) {
+            node.links.clear();
+            node.links.shrink_to_fit();
+        }
     return o;
 }
 

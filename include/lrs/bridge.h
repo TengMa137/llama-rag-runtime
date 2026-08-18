@@ -27,11 +27,20 @@ int lrs_index_open(const lrs_index_options* options, lrs_index** out, char** err
 int lrs_index_stage_upsert(const lrs_index* current, const lrs_index_options* options,
                            const char* document_id, const char* title, const char* content,
                            lrs_index** candidate, int* unchanged, char** error);
+int lrs_index_stage_upsert_with_metadata(const lrs_index* current, const lrs_index_options* options,
+                                         const char* document_id, const char* title,
+                                         const char* content, const char* const* metadata_keys,
+                                         const char* const* metadata_values, size_t metadata_count,
+                                         lrs_index** candidate, int* unchanged, char** error);
 int lrs_index_stage_delete(const lrs_index* current, const lrs_index_options* options,
                            const char* document_id, lrs_index** candidate, int* deleted,
                            char** error);
 int lrs_index_search_json(const lrs_index* index, const char* query, const char* mode, size_t top_k,
                           char** json, char** error);
+int lrs_index_search_filtered_json(const lrs_index* index, const char* query, const char* mode,
+                                   size_t top_k, const char* const* filter_keys,
+                                   const char* const* filter_values, size_t filter_count,
+                                   char** json, char** error);
 void lrs_index_destroy(lrs_index* index);
 void lrs_string_destroy(char* value);
 

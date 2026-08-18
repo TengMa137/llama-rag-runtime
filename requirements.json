@@ -2,7 +2,7 @@
   "schema": 1,
   "dependencies": {
     "llama.cpp": "7bd8282c37fcd9c4d7236106d664761a23318f18",
-    "catch2": "v3.8.1"
+    "catch2": ">=3,<4"
   },
   "requirement_ranges": [
     {"pattern":"LRS-SPEC-*","section":"all normative statements","milestone":"later unless activated explicitly","status":"planned","test":"","tier":"unassigned"},
@@ -18,10 +18,12 @@
     {"id":"LRS-ING-004","section":"13","milestone":"v0.1","status":"active","test":"[fault][req:LRS-ING-004]","tier":"fault"},
     {"id":"LRS-SEARCH-001","section":"15","milestone":"v0.1","status":"active","test":"[component][req:LRS-SEARCH-001]","tier":"component"},
     {"id":"LRS-SEARCH-002","section":"15","milestone":"v0.1","status":"active","test":"[unit][req:LRS-SEARCH-002]","tier":"unit"},
+    {"id":"LRS-SEARCH-003","section":"17.3, 17.5","milestone":"v0.2","status":"active","test":"[component][req:LRS-SEARCH-003]","tier":"component"},
     {"id":"LRS-SSE-001","section":"18","milestone":"v0.1","status":"active","test":"[unit][req:LRS-SSE-001]","tier":"unit"},
     {"id":"LRS-SSE-002","section":"18","milestone":"v0.1","status":"active","test":"[behavior][req:LRS-SSE-002]","tier":"behavior"},
     {"id":"LRS-CTX-001","section":"16","milestone":"v0.1","status":"active","test":"[unit][req:LRS-CTX-001]","tier":"unit"},
     {"id":"LRS-SEC-001","section":"10, 21","milestone":"v0.1","status":"active","test":"[unit][req:LRS-SEC-001]","tier":"unit"},
+    {"id":"LRS-SEC-002","section":"20","milestone":"v0.2","status":"active","test":"[unit][req:LRS-SEC-002]","tier":"unit"},
     {"id":"LRS-OPS-001","section":"23","milestone":"v0.1","status":"active","test":"[unit][req:LRS-OPS-001]","tier":"unit"},
     {"id":"LRS-MOBILE-001","section":"9.5","milestone":"mobile","status":"active","test":"[component][req:LRS-MOBILE-001][req:LRS-MOBILE-002]","tier":"component"},
     {"id":"LRS-MOBILE-002","section":"9.5","milestone":"mobile","status":"active","test":"[component][req:LRS-MOBILE-001][req:LRS-MOBILE-002]","tier":"component"},

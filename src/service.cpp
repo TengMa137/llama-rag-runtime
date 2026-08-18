@@ -1,23 +1,21 @@
 #include "lrs/service.hpp"
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
+#include <map>
 #include <nlohmann/json.hpp>
+#include <rag/dense/backends.hpp>
+#include <rag/engine.hpp>
+#include <rag/ingestion/job.hpp>
+#if LRS_ENABLE_POSTGRES
+#include <rag/ingestion/postgres_runtime.hpp>
+#endif
+#include <rag/text/chunker.hpp>
 #include <stdexcept>
+#include <vector>
 
 namespace lrs {
 namespace {
-std::size_t exact_token_count(void* context, const char* text, std::size_t length) {
-    const auto* client = static_cast<const ModelClient*>(context);
-    const auto tokens = client->tokenize_exact(std::string(text, length));
-    if (!tokens)
-        throw std::runtime_error("embedding backend exact tokenizer is unavailable");
-    return *tokens;
-}
-} // namespace
-namespace {
-std::shared_ptr<lrs_index> own(lrs_index* value) {
-    return {value, [](lrs_index* index) { lrs_index_destroy(index); }};
-}
 std::string sse(const std::string& event, const nlohmann::json& data) {
     return "event: " + event + "\ndata: " + data.dump() + "\n\n";
 }
@@ -31,12 +29,54 @@ std::int64_t created_at() {
                std::chrono::system_clock::now().time_since_epoch())
         .count();
 }
+
+std::map<std::string, std::string> string_tags(const nlohmann::json& value,
+                                               const char* field_name) {
+    constexpr std::size_t max_tags = 64;
+    constexpr std::size_t max_key_bytes = 128;
+    constexpr std::size_t max_value_bytes = 4096;
+    constexpr std::size_t max_total_bytes = 65536;
+    if (!value.is_object())
+        throw std::runtime_error(std::string(field_name) + " must be an object");
+    if (value.size() > max_tags)
+        throw std::runtime_error(std::string(field_name) + " has too many tags");
+    std::map<std::string, std::string> result;
+    std::size_t total = 0;
+    for (const auto& [key, item] : value.items()) {
+        if (!item.is_string())
+            throw std::runtime_error(std::string(field_name) + " values must be strings");
+        const auto tag = item.get<std::string>();
+        if (key.empty() || key.find('\0') != std::string::npos ||
+            tag.find('\0') != std::string::npos || key.size() > max_key_bytes ||
+            tag.size() > max_value_bytes || total > max_total_bytes - key.size() ||
+            total + key.size() > max_total_bytes - tag.size())
+            throw std::runtime_error(std::string(field_name) + " field size is invalid");
+        total += key.size() + tag.size();
+        result.emplace(key, std::move(tag));
+    }
+    return result;
+}
+
 nlohmann::json openai_error(const std::string& code, const std::string& message) {
     return {{"error",
              {{"message", message},
               {"type", "invalid_request_error"},
               {"param", nullptr},
               {"code", code}}}};
+}
+
+nlohmann::json job_json(const rag::ingestion::JobInfo& job) {
+    nlohmann::json value = {{"id", job.id},
+                            {"object", "rag.index_job"},
+                            {"document_id", job.document},
+                            {"revision", job.revision},
+                            {"status", std::string(rag::ingestion::name(job.status))},
+                            {"created_at_ms", job.created_at_ms},
+                            {"updated_at_ms", job.updated_at_ms}};
+    if (job.error)
+        value["error"] = {{"code", static_cast<int>(job.error->code)},
+                          {"message", job.error->message}};
+    return value;
 }
 } // namespace
 
@@ -45,31 +85,115 @@ Service::Service(Config config)
       generation_(config_.generation, config_.generation_api_model) {}
 Service::~Service() = default;
 
-lrs_index_options Service::options() const {
-    return {config_.index_path.c_str(),
-            config_.embedding.host.c_str(),
-            config_.embedding.port,
-            config_.embedding_dimension,
-            config_.deterministic_embeddings ? 1 : 0,
-            config_.embedding_api_model.c_str(),
-            config_.embedding_context_size,
-            8,
-            config_.deterministic_embeddings ? nullptr : exact_token_count,
-            config_.deterministic_embeddings ? nullptr : const_cast<ModelClient*>(&embedding_)};
-}
-
 void Service::initialize() {
     if (!config_.deterministic_embeddings && !embedding_.tokenize_exact("tokenizer capability"))
         throw std::runtime_error("embedding backend exact tokenizer is unavailable");
-    lrs_index* raw = nullptr;
-    char* message = nullptr;
-    const auto opts = options();
-    if (lrs_index_open(&opts, &raw, &message) != 0) {
-        const std::string error = message ? message : "index open failed";
-        lrs_string_destroy(message);
-        throw std::runtime_error(error);
+    rag::ingestion::EmbeddedRuntimeConfig runtime;
+    runtime.checkpoint_path = config_.index_path;
+    runtime.job_path = config_.index_path + ".jobs";
+    runtime.coordinator.worker_count = config_.ingestion_workers;
+    runtime.coordinator.queue_capacity = config_.ingestion_queue_capacity;
+    const auto& dense_config = config_.retrieval.embedded.dense;
+    auto implementation = rag::dense::parse_dense_implementation(dense_config.implementation);
+    auto algorithm = rag::dense::parse_dense_algorithm(dense_config.algorithm);
+    if (!implementation || !algorithm)
+        throw std::runtime_error("invalid dense retrieval policy");
+    auto& dense = runtime.maintenance.dense;
+    dense.implementation = *implementation;
+    dense.algorithm = *algorithm;
+    dense.exact_threshold = dense_config.exact_threshold;
+    dense.hnsw.neighbors = dense_config.hnsw.neighbors;
+    dense.hnsw.ef_construction = dense_config.hnsw.ef_construction;
+    dense.hnsw.ef_search = dense_config.hnsw.ef_search;
+    dense.hnsw.seed = dense_config.hnsw.seed;
+    dense.faiss.hnsw_neighbors = dense_config.faiss.hnsw_neighbors;
+    dense.faiss.ef_construction = dense_config.faiss.ef_construction;
+    dense.faiss.ef_search = dense_config.faiss.ef_search;
+    dense.faiss.ivf_lists = dense_config.faiss.ivf_lists;
+    dense.faiss.ivf_probes = dense_config.faiss.ivf_probes;
+    dense.faiss.minimum_training_vectors_per_list =
+        dense_config.faiss.minimum_training_vectors_per_list;
+    dense.faiss.pq_subquantizers = dense_config.faiss.pq_subquantizers;
+    dense.faiss.pq_bits = dense_config.faiss.pq_bits;
+    runtime.preparation.embedding_batch_size = 8;
+    auto& chunking = runtime.preparation.chunking;
+    chunking.max_lines = 40;
+    chunking.max_chars = 384;
+    chunking.overlap_lines = 4;
+    chunking.heading_context = false;
+    chunking.policy.model_identity = config_.embedding_api_model;
+    chunking.policy.dimension = config_.embedding_dimension;
+    if (config_.deterministic_embeddings) {
+        chunking.policy.tokenizer_identity = "conservative-utf8-bytes-v1";
+        chunking.policy.target_tokens = 320;
+        chunking.policy.max_tokens = 384;
+        chunking.policy.overlap_tokens = 32;
+        chunking.policy.counting_mode = rag::text::TokenCountingMode::conservative_utf8_bytes;
+        runtime.embedder =
+            rag::dense::AnyEmbedder{rag::dense::HashEmbedder{config_.embedding_dimension}};
+        runtime.sync_mode = rag::store::SyncMode::none;
+    } else {
+        chunking.policy.tokenizer_identity = "backend-exact-v1";
+        chunking.policy.max_tokens = config_.embedding_context_size;
+        chunking.policy.reserved_tokens = 8;
+        const auto usable = chunking.policy.max_tokens - chunking.policy.reserved_tokens;
+        chunking.policy.target_tokens = std::max<std::size_t>(1, usable * 3 / 4);
+        chunking.policy.overlap_tokens = usable / 8;
+        chunking.policy.counting_mode = rag::text::TokenCountingMode::exact;
+        chunking.measure_tokens = [this](std::string_view text) {
+            const auto tokens = embedding_.tokenize_exact(std::string(text));
+            if (!tokens)
+                throw std::runtime_error("embedding backend exact tokenizer is unavailable");
+            return *tokens;
+        };
+        rag::dense::LocalHttpEmbedderConfig embedder;
+        embedder.host = config_.embedding.host;
+        embedder.port = config_.embedding.port;
+        embedder.model = config_.embedding_api_model;
+        embedder.dimension = config_.embedding_dimension;
+        auto created = rag::dense::LocalHttpEmbedder::create(std::move(embedder));
+        if (!created)
+            throw std::runtime_error(created.error().message);
+        runtime.embedder = rag::dense::AnyEmbedder{std::move(*created)};
     }
-    std::atomic_store(&active_, own(raw));
+    auto opened = [&]() -> rag::Result<rag::Engine> {
+        if (config_.retrieval.backend == "embedded")
+            return rag::Engine::open_runtime(std::move(runtime));
+#if LRS_ENABLE_POSTGRES
+        const auto& configured = config_.retrieval.postgres;
+        const char* connection = std::getenv(configured.connection_env.c_str());
+        if (!connection || *connection == '\0')
+            return rag::fail<rag::Engine>(rag::Errc::invalid_argument,
+                                          "PostgreSQL connection environment variable is not set");
+        rag::ingestion::PostgresRuntimeConfig postgres;
+        postgres.preparation = std::move(runtime.preparation);
+        postgres.embedder = std::move(runtime.embedder);
+        postgres.coordinator = std::move(runtime.coordinator);
+        postgres.database.connection_string = connection;
+        postgres.database.schema = configured.schema;
+        postgres.database.corpus = configured.corpus;
+        postgres.database.pool_size = configured.pool_size;
+        postgres.database.acquire_timeout =
+            std::chrono::milliseconds(configured.acquire_timeout_ms);
+        postgres.database.statement_timeout =
+            std::chrono::milliseconds(configured.statement_timeout_ms);
+        postgres.database.vector_index = configured.vector_index == "hnsw"
+                                             ? rag::backend::PostgresVectorIndex::hnsw
+                                             : rag::backend::PostgresVectorIndex::exact;
+        postgres.database.hnsw_ef_search = configured.hnsw_ef_search;
+        auto remote = rag::ingestion::PostgresRuntime::open(std::move(postgres));
+        if (!remote)
+            return rag::unexpected(remote.error());
+        return rag::Engine::open_runtime(
+            std::unique_ptr<rag::ingestion::Runtime>(std::move(*remote)));
+#else
+        return rag::fail<rag::Engine>(rag::Errc::unavailable,
+                                      "PostgreSQL support is not enabled in this build");
+#endif
+    }();
+    if (!opened)
+        throw std::runtime_error(opened.error().message);
+    runtime_ = std::make_unique<rag::Engine>(std::move(*opened));
     ready_ = config_.deterministic_embeddings || (embedding_.healthy() && generation_.healthy());
     if (!ready_)
         throw std::runtime_error("generation model is not ready");
@@ -80,12 +204,14 @@ std::string Service::health_json() const {
     return nlohmann::json{{"status", ready_ ? "ok" : "starting"}, {"ready", ready_}}.dump();
 }
 
-std::string Service::ingest(const std::string& body, int& status) {
+std::string Service::ingest(const std::string& body, int& status, bool asynchronous) {
     try {
         const auto input = nlohmann::json::parse(body);
         const std::string id = input.at("id");
         const std::string title = input.value("title", "");
         const std::string content = input.at("content");
+        const auto metadata =
+            string_tags(input.value("metadata", nlohmann::json::object()), "metadata");
         if (id.empty() || content.empty())
             throw std::runtime_error("id and content must be non-empty");
         if (std::any_of(id.begin(), id.end(),
@@ -94,28 +220,48 @@ std::string Service::ingest(const std::string& body, int& status) {
         if (input.value("content_type", "text/plain") != "text/plain" &&
             input.value("content_type", "text/plain") != "text/markdown")
             throw std::runtime_error("unsupported content_type");
-        std::lock_guard<std::mutex> lock(mutation_);
-        lrs_index* candidate = nullptr;
-        char* message = nullptr;
-        int unchanged = 0;
-        const auto opts = options();
-        const auto current = std::atomic_load(&active_);
-        if (lrs_index_stage_upsert(current.get(), &opts, id.c_str(), title.c_str(), content.c_str(),
-                                   &candidate, &unchanged, &message) != 0) {
-            const std::string error = message ? message : "ingestion failed";
-            lrs_string_destroy(message);
+        auto submitted = runtime_->ingest({id, title, content, metadata}, asynchronous);
+        if (!submitted) {
             status = 503;
-            return nlohmann::json{{"error", {{"code", "ingestion_failed"}, {"message", error}}}}
+            return nlohmann::json{
+                {"error", {{"code", "ingestion_failed"}, {"message", submitted.error().message}}}}
                 .dump();
         }
-        std::atomic_store(&active_, own(candidate));
-        status = unchanged ? 200 : 201;
-        return nlohmann::json{{"id", id}, {"status", unchanged ? "unchanged" : "indexed"}}.dump();
+        if (submitted->unchanged) {
+            status = 200;
+            return nlohmann::json{{"id", id}, {"status", "unchanged"}}.dump();
+        }
+        if (asynchronous) {
+            status = 202;
+            return job_json(rag::ingestion::info(submitted->job)).dump();
+        }
+        if (submitted->job.status != rag::ingestion::JobStatus::ready) {
+            status = 503;
+            const auto message = submitted->job.error
+                                     ? submitted->job.error->message
+                                     : std::string("ingestion did not become ready");
+            return nlohmann::json{{"error", {{"code", "ingestion_failed"}, {"message", message}}}}
+                .dump();
+        }
+        status = 201;
+        return nlohmann::json{{"id", id}, {"status", "indexed"}}.dump();
     } catch (const std::exception& e) {
         status = 400;
         return nlohmann::json{{"error", {{"code", "invalid_request"}, {"message", e.what()}}}}
             .dump();
     }
+}
+
+std::string Service::get_job(const std::string& id, int& status) const {
+    const auto found = runtime_->job(id);
+    if (!found) {
+        status = found.error().code == rag::Errc::not_found ? 404 : 503;
+        return nlohmann::json{
+            {"error", {{"code", "job_not_found"}, {"message", found.error().message}}}}
+            .dump();
+    }
+    status = 200;
+    return job_json(*found).dump();
 }
 
 std::string Service::delete_document(const std::string& id, int& status) {
@@ -125,24 +271,19 @@ std::string Service::delete_document(const std::string& id, int& status) {
         if (std::any_of(id.begin(), id.end(),
                         [](unsigned char c) { return c < 0x20 || c == 0x7f; }))
             throw std::runtime_error("id must not contain control characters");
-        std::lock_guard<std::mutex> lock(mutation_);
-        lrs_index* candidate = nullptr;
-        char* message = nullptr;
-        int deleted = 0;
-        const auto opts = options();
-        const auto current = std::atomic_load(&active_);
-        if (lrs_index_stage_delete(current.get(), &opts, id.c_str(), &candidate, &deleted,
-                                   &message) != 0) {
-            const std::string error = message ? message : "deletion failed";
-            lrs_string_destroy(message);
+        auto erased = runtime_->erase(id);
+        if (!erased || erased->status != rag::ingestion::JobStatus::ready) {
+            const std::string error = !erased         ? erased.error().message
+                                      : erased->error ? erased->error->message
+                                                      : "deletion did not become ready";
             status = 503;
             return nlohmann::json{{"error", {{"code", "deletion_failed"}, {"message", error}}}}
                 .dump();
         }
-        std::atomic_store(&active_, own(candidate));
         status = 200;
-        return nlohmann::json{
-            {"object", "rag.document.deleted"}, {"id", id}, {"deleted", deleted != 0}}
+        return nlohmann::json{{"object", "rag.document.deleted"},
+                              {"id", id},
+                              {"deleted", erased->mutation_applied.value_or(false)}}
             .dump();
     } catch (const std::exception& e) {
         status = 400;
@@ -157,19 +298,42 @@ std::string Service::search(const std::string& body, int& status) const {
         const std::string query = input.at("query");
         const std::string mode = input.value("mode", "hybrid");
         const std::size_t top_k = input.value("top_k", 8U);
-        auto snapshot = std::atomic_load(&active_);
-        char* output = nullptr;
-        char* message = nullptr;
-        if (lrs_index_search_json(snapshot.get(), query.c_str(), mode.c_str(), top_k, &output,
-                                  &message) != 0) {
-            const std::string error = message ? message : "search failed";
-            lrs_string_destroy(message);
-            throw std::runtime_error(error);
-        }
-        std::string result(output);
-        lrs_string_destroy(output);
+        if (query.empty())
+            throw std::runtime_error("query must be non-empty");
+        const auto filter = string_tags(input.value("filter", nlohmann::json::object()), "filter");
+        if (top_k == 0 || top_k > 100)
+            throw std::runtime_error("top_k must be between 1 and 100");
+        rag::backend::SearchRequest request;
+        request.query = query;
+        request.top_k = top_k;
+        request.candidate_pool = std::max<std::size_t>(top_k * 6, 60);
+        request.filter.required = filter;
+        if (mode == "lexical")
+            request.mode = rag::backend::SearchMode::lexical;
+        else if (mode == "dense")
+            request.mode = rag::backend::SearchMode::dense;
+        else if (mode == "hybrid")
+            request.mode = rag::backend::SearchMode::hybrid;
+        else
+            throw std::runtime_error("mode must be lexical, dense, or hybrid");
+        auto found = runtime_->search(std::move(request));
+        if (!found)
+            throw std::runtime_error(found.error().message);
+        nlohmann::json result;
+        result["results"] = nlohmann::json::array();
+        std::size_t rank = 1;
+        for (const auto& hit : *found)
+            result["results"].push_back({{"document_id", hit.document_key},
+                                         {"chunk_id", hit.chunk_key},
+                                         {"title", hit.title},
+                                         {"metadata", hit.metadata},
+                                         {"rank", rank++},
+                                         {"score", hit.score.get()},
+                                         {"start_line", hit.start_line},
+                                         {"end_line", hit.end_line},
+                                         {"text", hit.text}});
         status = 200;
-        return result;
+        return result.dump();
     } catch (const std::exception& e) {
         status = 400;
         return nlohmann::json{{"error", {{"code", "search_failed"}, {"message", e.what()}}}}.dump();
@@ -215,9 +379,10 @@ bool Service::grounded_generate(const std::string& body,
             throw std::runtime_error("max_tokens exceeds the RAG context budget");
 
         int search_status = 0;
-        const auto found = nlohmann::json::parse(
-            search(nlohmann::json{{"query", question}, {"mode", mode}, {"top_k", top_k}}.dump(),
-                   search_status));
+        nlohmann::json search_request = {{"query", question}, {"mode", mode}, {"top_k", top_k}};
+        if (retrieval.contains("filter"))
+            search_request["filter"] = retrieval.at("filter");
+        const auto found = nlohmann::json::parse(search(search_request.dump(), search_status));
         if (search_status != 200)
             throw std::runtime_error("retrieval failed");
         const auto sources = found.at("results");

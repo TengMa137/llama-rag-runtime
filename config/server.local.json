@@ -1,6 +1,13 @@
 {
   "listen": { "host": "127.0.0.1", "port": 8080 },
-  "index": { "path": "data/knowledge.ragdb" },
+  "retrieval": {
+    "backend": "embedded",
+    "embedded": {
+      "path": "data/knowledge.ragdb",
+      "dense": { "implementation": "native", "algorithm": "automatic" }
+    }
+  },
+  "ingestion": { "workers": 1, "queue_capacity": 64 },
   "inference": {
     "spawn": true,
     "llama_server": "build/macos-dev/bin/llama-server",

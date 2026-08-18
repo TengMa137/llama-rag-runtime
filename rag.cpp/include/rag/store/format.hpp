@@ -53,7 +53,9 @@ constexpr std::uint32_t kMaxWalRecordBytes = 64 * 1024 * 1024;
 //   minor-0 reader skips the unknown tag and sees exactly what it saw before
 //   this existed — i.e. deleted documents come back — which is the pre-existing
 //   behaviour, not a new regression.
-//   minor 2: additive embedding-policy fields in the existing META JSON.
+//   minor 2: additive embedding-policy fields in META. Backend-neutral runtime
+//   checkpoints may also add RTME; legacy readers skip it and consume the
+//   ordinary DOCS/CHNK/EMBD/BM25 sections unchanged.
 
 enum Flags : std::uint32_t {
     kHasHnsw = 1u << 0,
@@ -62,13 +64,14 @@ enum Flags : std::uint32_t {
 
 // Four-char section tags (little-endian u32 of the ASCII).
 enum class Tag : std::uint32_t {
-    meta = 0x4154454D,   // "META" — corpus config JSON
-    docs = 0x53434F44,   // "DOCS" — documents
-    chunks = 0x4B4E4843, // "CHNK" — chunk records (no embeddings)
-    embed = 0x42444D45,  // "EMBD" — chunk embeddings (parallel to chunks)
-    bm25 = 0x35324D42,   // "BM25" — serialized inverted index
-    hnsw = 0x57534E48,   // "HNSW" — serialized ANN graph
-    tomb = 0x424D4F54,   // "TOMB" — tombstoned (soft-deleted) DocId values
+    meta = 0x4154454D,    // "META" — corpus config JSON
+    docs = 0x53434F44,    // "DOCS" — documents
+    chunks = 0x4B4E4843,  // "CHNK" — chunk records (no embeddings)
+    embed = 0x42444D45,   // "EMBD" — chunk embeddings (parallel to chunks)
+    bm25 = 0x35324D42,    // "BM25" — serialized inverted index
+    hnsw = 0x57534E48,    // "HNSW" — serialized ANN graph
+    tomb = 0x424D4F54,    // "TOMB" — tombstoned (soft-deleted) DocId values
+    runtime = 0x454D5452, // "RTME" — portable runtime revisions and public IDs
 };
 
 // CRC32 (IEEE 802.3) over a byte range.

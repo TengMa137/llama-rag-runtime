@@ -94,6 +94,21 @@ int main(int argc, char** argv) {
             std::rethrow_exception(last);
 
         httplib::Server server;
+        server.set_pre_routing_handler(
+            [&config](const httplib::Request& request, httplib::Response& response) {
+                const auto key_count = request.get_header_value_count("X-API-Key");
+                if (lrs::authorize_api_request(config, key_count,
+                                               request.get_header_value("X-API-Key")))
+                    return httplib::Server::HandlerResponse::Unhandled;
+                response.status = 401;
+                response.set_header("WWW-Authenticate", "ApiKey header=\"X-API-Key\"");
+                response.set_content(nlohmann::json{{"error",
+                                                     {{"code", "invalid_api_key"},
+                                                      {"message", "missing or invalid X-API-Key"}}}}
+                                         .dump(),
+                                     "application/json");
+                return httplib::Server::HandlerResponse::Handled;
+            });
         server.Get("/health", [&](const httplib::Request&, httplib::Response& response) {
             response.set_content(service.health_json(), "application/json");
         });
@@ -141,12 +156,24 @@ int main(int argc, char** argv) {
                     return false;
                 });
         });
-        server.Post(
-            "/v1/rag/documents", [&](const httplib::Request& request, httplib::Response& response) {
-                int status = 0;
-                response.set_content(service.ingest(request.body, status), "application/json");
-                response.status = status;
-            });
+        server.Post("/v1/rag/documents", [&](const httplib::Request& request,
+                                             httplib::Response& response) {
+            int status = 0;
+            const bool asynchronous = request.get_header_value("Prefer") == "respond-async";
+            const std::string body = service.ingest(request.body, status, asynchronous);
+            response.set_content(body, "application/json");
+            response.status = status;
+            if (status == 202) {
+                const auto job = nlohmann::json::parse(body);
+                response.set_header("Location", "/v1/rag/jobs/" + job.at("id").get<std::string>());
+            }
+        });
+        server.Get(R"(/v1/rag/jobs/(.+))", [&](const httplib::Request& request,
+                                               httplib::Response& response) {
+            int status = 0;
+            response.set_content(service.get_job(request.matches[1], status), "application/json");
+            response.status = status;
+        });
         server.Delete(R"(/v1/rag/documents/(.+))",
                       [&](const httplib::Request& request, httplib::Response& response) {
                           int status = 0;

@@ -47,10 +47,15 @@ struct Chunk {
 struct SearchResult {
     ChunkId chunk = ChunkId::invalid();
     DocId doc = DocId::invalid();
+    std::string chunk_key;    // stable backend-neutral public ID
+    std::string document_key; // stable caller-supplied document ID
+    std::uint64_t revision = 0;
     Score score{0.0f};
     std::string text;
     std::string context;
     std::string uri;
+    std::string title;
+    Metadata metadata;
     std::uint32_t start_line = 0;
     std::uint32_t end_line = 0;
 };
